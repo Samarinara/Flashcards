@@ -18,6 +18,7 @@ use flashcards::{
     storage::{self, LibraryEntry},
     study::{StudyPhase, StudySession},
 };
+use glib::subclass::prelude::ObjectSubclassIsExt;
 use libadwaita as adw;
 use uuid::Uuid;
 
@@ -36,6 +37,80 @@ struct EditorState {
     dirty: bool,
     updating_form: bool,
     loaded_modified: Option<SystemTime>,
+}
+
+mod flip_card {
+    use super::*;
+    use gtk::subclass::prelude::*;
+
+    #[derive(Default)]
+    pub struct FlipCard {
+        pub child: RefCell<Option<gtk::Widget>>,
+        pub angle: Cell<f32>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for FlipCard {
+        const NAME: &'static str = "FlashcardsFlipCard";
+        type Type = super::FlipCard;
+        type ParentType = gtk::Widget;
+
+        fn class_init(class: &mut Self::Class) {
+            class.set_layout_manager_type::<gtk::BinLayout>();
+        }
+    }
+
+    impl ObjectImpl for FlipCard {
+        fn dispose(&self) {
+            if let Some(child) = self.child.borrow_mut().take() {
+                child.unparent();
+            }
+        }
+    }
+
+    impl WidgetImpl for FlipCard {
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            let Some(child) = self.child.borrow().as_ref().cloned() else {
+                return;
+            };
+            let widget = self.obj();
+            let center = gtk::graphene::Point::new(
+                widget.width() as f32 / 2.0,
+                widget.height() as f32 / 2.0,
+            );
+            let inverse_center = gtk::graphene::Point::new(-center.x(), -center.y());
+
+            snapshot.save();
+            snapshot.translate(&center);
+            snapshot.perspective(900.0);
+            snapshot.rotate_3d(self.angle.get(), &gtk::graphene::Vec3::new(0.0, 1.0, 0.0));
+            snapshot.translate(&inverse_center);
+            widget.snapshot_child(&child, snapshot);
+            snapshot.restore();
+        }
+    }
+}
+
+glib::wrapper! {
+    pub struct FlipCard(ObjectSubclass<flip_card::FlipCard>)
+        @extends gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl FlipCard {
+    fn new(child: &impl IsA<gtk::Widget>) -> Self {
+        let flip_card: Self = glib::Object::builder().build();
+        let child = child.clone().upcast::<gtk::Widget>();
+        child.set_parent(&flip_card);
+        flip_card.imp().child.replace(Some(child));
+        flip_card.set_overflow(gtk::Overflow::Visible);
+        flip_card
+    }
+
+    fn set_angle(&self, angle: f32) {
+        self.imp().angle.set(angle);
+        self.queue_draw();
+    }
 }
 
 pub fn run() -> glib::ExitCode {
@@ -1200,15 +1275,7 @@ fn show_study(
         .selectable(true)
         .css_classes(["title-2"])
         .margin_top(18)
-        .build();
-    let answer_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    answer_box.add_css_class("study-answer");
-    answer_box.append(&answer_label);
-    answer_box.append(&answer);
-    let answer_revealer = gtk::Revealer::builder()
-        .transition_type(gtk::RevealerTransitionType::Crossfade)
-        .transition_duration(180)
-        .child(&answer_box)
+        .margin_bottom(6)
         .build();
     let reveal = gtk::Button::builder()
         .label("Show Answer")
@@ -1243,12 +1310,25 @@ fn show_study(
         .margin_bottom(28)
         .child(&actions)
         .build();
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    card.add_css_class("card");
-    card.add_css_class("study-card");
-    card.append(&question_label);
-    card.append(&prompt);
-    card.append(&answer_revealer);
+    let question_face = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    question_face.add_css_class("card");
+    question_face.add_css_class("study-card");
+    question_face.append(&question_label);
+    question_face.append(&prompt);
+    let answer_face = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    answer_face.add_css_class("card");
+    answer_face.add_css_class("study-card");
+    answer_face.append(&answer_label);
+    answer_face.append(&answer);
+    let faces = gtk::Stack::builder()
+        .hhomogeneous(true)
+        .vhomogeneous(true)
+        .transition_type(gtk::StackTransitionType::None)
+        .build();
+    faces.add_named(&question_face, Some("question"));
+    faces.add_named(&answer_face, Some("answer"));
+    faces.set_visible_child_name("question");
+    let card = FlipCard::new(&faces);
     let card_clamp = adw::Clamp::builder()
         .maximum_size(720)
         .margin_top(24)
@@ -1287,6 +1367,7 @@ fn show_study(
     overlay.set_child(Some(&content));
     overlay.add_overlay(&confetti);
     let card_animation = Rc::new(RefCell::new(None));
+    let flip_animation = Rc::new(RefCell::new(None));
     let confetti_animation = Rc::new(RefCell::new(None));
     toolbar.set_content(Some(&overlay));
 
@@ -1302,15 +1383,17 @@ fn show_study(
     );
     reveal.connect_clicked(glib::clone!(
         #[weak]
-        answer_revealer,
+        card,
+        #[weak]
+        faces,
         #[weak]
         actions,
         #[weak]
         good,
+        #[strong]
+        flip_animation,
         move |_| {
-            answer_revealer.set_reveal_child(true);
-            actions.set_visible_child_name("ratings");
-            good.grab_focus();
+            animate_card_flip(&card, &faces, &actions, &good, &flip_animation);
         }
     ));
     connect_rating(
@@ -1328,10 +1411,10 @@ fn show_study(
         &counter,
         &card,
         &card_animation,
+        &faces,
         &confetti,
         &confetti_progress,
         &confetti_animation,
-        &answer_revealer,
         &actions,
         &reveal,
         &good,
@@ -1351,10 +1434,10 @@ fn show_study(
         &counter,
         &card,
         &card_animation,
+        &faces,
         &confetti,
         &confetti_progress,
         &confetti_animation,
-        &answer_revealer,
         &actions,
         &reveal,
         &again,
@@ -1378,12 +1461,12 @@ fn connect_rating(
     progress: &gtk::ProgressBar,
     phase: &gtk::Label,
     counter: &gtk::Label,
-    card: &gtk::Box,
+    card: &FlipCard,
     card_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
+    faces: &gtk::Stack,
     confetti: &gtk::DrawingArea,
     confetti_progress: &Rc<Cell<f64>>,
     confetti_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
-    answer_revealer: &gtk::Revealer,
     actions: &gtk::Stack,
     reveal: &gtk::Button,
     other_rating: &gtk::Button,
@@ -1406,9 +1489,9 @@ fn connect_rating(
         #[weak]
         card,
         #[weak]
-        confetti,
+        faces,
         #[weak]
-        answer_revealer,
+        confetti,
         #[weak]
         actions,
         #[strong]
@@ -1474,7 +1557,8 @@ fn connect_rating(
                 &counter,
                 again_button,
             );
-            answer_revealer.set_reveal_child(false);
+            card.set_angle(0.0);
+            faces.set_visible_child_name("question");
             actions.set_visible_child_name("reveal");
             animate_card_entrance(&card, &card_animation);
             if rating == Rating::Good {
@@ -1530,8 +1614,70 @@ fn update_study_card(
     }
 }
 
+fn animate_card_flip(
+    card: &FlipCard,
+    faces: &gtk::Stack,
+    actions: &gtk::Stack,
+    good: &gtk::Button,
+    current_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
+) {
+    actions.set_sensitive(false);
+    if !adw::is_animations_enabled(card) {
+        card.set_angle(0.0);
+        faces.set_visible_child_name("answer");
+        actions.set_visible_child_name("ratings");
+        actions.set_sensitive(true);
+        good.grab_focus();
+        return;
+    }
+
+    let showing_answer = Rc::new(Cell::new(false));
+    let target = adw::CallbackAnimationTarget::new(glib::clone!(
+        #[weak]
+        card,
+        #[weak]
+        faces,
+        #[strong]
+        showing_answer,
+        move |value| {
+            let second_half = value >= 0.5;
+            if second_half && !showing_answer.replace(true) {
+                faces.set_visible_child_name("answer");
+            }
+            let angle = if second_half {
+                ((value - 1.0) * 180.0) as f32
+            } else {
+                (value * 180.0) as f32
+            };
+            card.set_angle(angle);
+        }
+    ));
+    let animation = adw::TimedAnimation::new(card, 0.0, 1.0, 420, target);
+    animation.set_easing(adw::Easing::EaseInOutCubic);
+    animation.set_follow_enable_animations_setting(true);
+    animation.connect_done(glib::clone!(
+        #[weak]
+        card,
+        #[weak]
+        faces,
+        #[weak]
+        actions,
+        #[weak]
+        good,
+        move |_| {
+            card.set_angle(0.0);
+            faces.set_visible_child_name("answer");
+            actions.set_visible_child_name("ratings");
+            actions.set_sensitive(true);
+            good.grab_focus();
+        }
+    ));
+    animation.play();
+    *current_animation.borrow_mut() = Some(animation);
+}
+
 fn animate_card_entrance(
-    card: &gtk::Box,
+    card: &FlipCard,
     current_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
 ) {
     let target = adw::CallbackAnimationTarget::new(glib::clone!(
@@ -1977,11 +2123,6 @@ fn install_css() {
             min-height: 260px;
             padding: 36px;
             border-radius: 18px;
-        }
-        .study-answer {
-            margin-top: 24px;
-            padding-top: 24px;
-            border-top: 1px solid alpha(@window_fg_color, 0.12);
         }
         .study-progress trough,
         .study-progress progress {
