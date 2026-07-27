@@ -6,6 +6,19 @@ use uuid::Uuid;
 
 use crate::model::{Deck, Rating, SessionSummary, StudyOrder};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StudyPhase {
+    FirstPass,
+    MissedCards,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StudyProgress {
+    pub phase: StudyPhase,
+    pub completed: usize,
+    pub total: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct StudySession {
     pub id: Uuid,
@@ -59,9 +72,25 @@ impl StudySession {
         self.current
     }
 
-    pub fn progress(&self) -> (usize, usize) {
-        let completed = self.seen.len().min(self.initial_count);
-        (completed, self.initial_count)
+    pub fn progress(&self) -> StudyProgress {
+        let retrying = self
+            .current
+            .is_some_and(|card_id| self.seen.contains(&card_id));
+        if retrying {
+            let total = self.requeued.len();
+            let remaining = self.queue.len() + 1;
+            StudyProgress {
+                phase: StudyPhase::MissedCards,
+                completed: total.saturating_sub(remaining),
+                total,
+            }
+        } else {
+            StudyProgress {
+                phase: StudyPhase::FirstPass,
+                completed: self.seen.len().min(self.initial_count),
+                total: self.initial_count,
+            }
+        }
     }
 
     pub fn rate(&mut self, rating: Rating) -> Option<Uuid> {
@@ -132,6 +161,33 @@ mod tests {
             vec!["easy".into(), "verbs".into()],
         );
         assert_eq!(session.current_card(), Some(included));
-        assert_eq!(session.progress(), (0, 1));
+        assert_eq!(
+            session.progress(),
+            StudyProgress {
+                phase: StudyPhase::FirstPass,
+                completed: 0,
+                total: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn progress_restarts_for_missed_cards() {
+        let mut deck = Deck::new("Deck");
+        deck.cards.push(Card::new("A", "B"));
+        deck.cards.push(Card::new("C", "D"));
+        let mut session = StudySession::new(&deck, StudyOrder::Sequential, vec![]);
+
+        session.rate(Rating::Again);
+        assert_eq!(session.progress().phase, StudyPhase::FirstPass);
+        session.rate(Rating::Good);
+        assert_eq!(
+            session.progress(),
+            StudyProgress {
+                phase: StudyPhase::MissedCards,
+                completed: 0,
+                total: 1,
+            }
+        );
     }
 }

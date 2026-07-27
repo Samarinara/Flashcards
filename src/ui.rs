@@ -16,7 +16,7 @@ use flashcards::{
     model::{Card, Deck, Rating, StudyOrder},
     preferences::Preferences,
     storage::{self, LibraryEntry},
-    study::StudySession,
+    study::{StudyPhase, StudySession},
 };
 use libadwaita as adw;
 use uuid::Uuid;
@@ -1332,17 +1332,28 @@ fn update_study_card(
         prompt.set_text(&card.front);
         answer.set_text(&card.back);
     }
-    let (completed, total) = session.progress();
-    progress.set_fraction(if total == 0 {
+    let study_progress = session.progress();
+    progress.set_fraction(if study_progress.total == 0 {
         0.0
     } else {
-        completed as f64 / total as f64
+        study_progress.completed as f64 / study_progress.total as f64
     });
-    progress.set_text(Some(&format!(
-        "{} of {}",
-        (completed + 1).min(total),
-        total
-    )));
+    let current = (study_progress.completed + 1).min(study_progress.total);
+    match study_progress.phase {
+        StudyPhase::FirstPass => {
+            progress.remove_css_class("warning");
+            progress.set_text(Some(&format!("{current} of {}", study_progress.total)));
+            progress.set_tooltip_text(Some("Initial card pass"));
+        }
+        StudyPhase::MissedCards => {
+            progress.add_css_class("warning");
+            progress.set_text(Some(&format!(
+                "Reviewing missed cards — {current} of {}",
+                study_progress.total
+            )));
+            progress.set_tooltip_text(Some("Reviewing cards rated Again"));
+        }
+    }
 }
 
 fn create_deck_dialog(
