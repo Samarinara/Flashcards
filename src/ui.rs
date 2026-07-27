@@ -47,6 +47,7 @@ mod flip_card {
     pub struct FlipCard {
         pub child: RefCell<Option<gtk::Widget>>,
         pub angle: Cell<f32>,
+        pub vertical_offset: Cell<f32>,
     }
 
     #[glib::object_subclass]
@@ -81,6 +82,7 @@ mod flip_card {
             let inverse_center = gtk::graphene::Point::new(-center.x(), -center.y());
 
             snapshot.save();
+            snapshot.translate(&gtk::graphene::Point::new(0.0, self.vertical_offset.get()));
             snapshot.translate(&center);
             snapshot.perspective(900.0);
             snapshot.rotate_3d(self.angle.get(), &gtk::graphene::Vec3::new(0.0, 1.0, 0.0));
@@ -109,6 +111,11 @@ impl FlipCard {
 
     fn set_angle(&self, angle: f32) {
         self.imp().angle.set(angle);
+        self.queue_draw();
+    }
+
+    fn set_vertical_offset(&self, offset: f32) {
+        self.imp().vertical_offset.set(offset);
         self.queue_draw();
     }
 }
@@ -1457,7 +1464,17 @@ fn show_study(
     );
     let page = adw::NavigationPage::new(&toolbar, "Study");
     navigation.push(&page);
-    animate_card_entrance(&card, &card_animation);
+    glib::idle_add_local_once(glib::clone!(
+        #[weak]
+        card,
+        #[weak]
+        actions,
+        #[weak]
+        reveal,
+        #[strong]
+        card_animation,
+        move || animate_card_entrance(&card, &actions, &reveal, &card_animation)
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1546,38 +1563,93 @@ fn connect_rating(
                 return;
             }
             session.borrow_mut().rate(rating);
-            if session.borrow().is_complete() {
+            let complete = session.borrow().is_complete();
+            if complete {
                 let summary = session.borrow().clone().finish(Utc::now());
                 if let Ok(mut latest) = storage::load_deck(&path) {
                     latest.sessions.push(summary);
                     let _ = storage::save_deck(&path, &latest);
                 }
-                toast_window(&window, "Session complete");
-                navigation.pop();
-                return;
             }
-            let again_button = match rating {
-                Rating::Again => button,
-                Rating::Good => &other_rating,
+            actions.set_sensitive(false);
+            let rated_button = button.clone();
+            let exit_direction = match rating {
+                Rating::Again => 1.0,
+                Rating::Good => -1.0,
             };
-            update_study_card(
-                &snapshot,
-                &session.borrow(),
-                &prompt,
-                &answer,
-                &progress,
-                &phase,
-                &counter,
-                again_button,
+            animate_card_exit(
+                &card,
+                exit_direction,
+                &card_animation,
+                glib::clone!(
+                    #[weak]
+                    window,
+                    #[weak]
+                    navigation,
+                    #[weak]
+                    prompt,
+                    #[weak]
+                    answer,
+                    #[weak]
+                    progress,
+                    #[weak]
+                    phase,
+                    #[weak]
+                    counter,
+                    #[weak]
+                    card,
+                    #[weak]
+                    faces,
+                    #[weak]
+                    confetti,
+                    #[weak]
+                    actions,
+                    #[weak]
+                    reveal,
+                    #[weak]
+                    rated_button,
+                    #[weak]
+                    other_rating,
+                    #[strong]
+                    snapshot,
+                    #[strong]
+                    session,
+                    #[strong]
+                    card_animation,
+                    #[strong]
+                    confetti_progress,
+                    #[strong]
+                    confetti_animation,
+                    move || {
+                        if complete {
+                            toast_window(&window, "Session complete");
+                            navigation.pop();
+                            return;
+                        }
+                        let again_button = match rating {
+                            Rating::Again => &rated_button,
+                            Rating::Good => &other_rating,
+                        };
+                        update_study_card(
+                            &snapshot,
+                            &session.borrow(),
+                            &prompt,
+                            &answer,
+                            &progress,
+                            &phase,
+                            &counter,
+                            again_button,
+                        );
+                        card.set_angle(0.0);
+                        faces.set_visible_child_name("question");
+                        actions.set_visible_child_name("reveal");
+                        animate_card_entrance(&card, &actions, &reveal, &card_animation);
+                        if rating == Rating::Good {
+                            animate_confetti(&confetti, &confetti_progress, &confetti_animation);
+                        }
+                    }
+                ),
             );
-            card.set_angle(0.0);
-            faces.set_visible_child_name("question");
-            actions.set_visible_child_name("reveal");
-            animate_card_entrance(&card, &card_animation);
-            if rating == Rating::Good {
-                animate_confetti(&confetti, &confetti_progress, &confetti_animation);
-            }
-            reveal.grab_focus();
         }
     ));
 }
@@ -1691,18 +1763,85 @@ fn animate_card_flip(
 
 fn animate_card_entrance(
     card: &FlipCard,
+    actions: &gtk::Stack,
+    reveal: &gtk::Button,
     current_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
 ) {
+    actions.set_sensitive(false);
+    card.set_angle(0.0);
+    if !adw::is_animations_enabled(card) {
+        card.set_vertical_offset(0.0);
+        card.set_opacity(1.0);
+        actions.set_sensitive(true);
+        reveal.grab_focus();
+        return;
+    }
+
+    let distance = (card.height() as f64 + 48.0).max(120.0);
+    card.set_vertical_offset(distance as f32);
+    card.set_opacity(0.35);
     let target = adw::CallbackAnimationTarget::new(glib::clone!(
         #[weak]
         card,
-        move |value| card.set_opacity(value)
+        move |value| {
+            card.set_vertical_offset((distance * (1.0 - value)) as f32);
+            card.set_opacity(0.35 + value * 0.65);
+        }
     ));
-    let animation = adw::TimedAnimation::new(card, 0.45, 1.0, 180, target);
+    let animation = adw::TimedAnimation::new(card, 0.0, 1.0, 280, target);
     animation.set_easing(adw::Easing::EaseOutCubic);
     animation.set_follow_enable_animations_setting(true);
+    animation.connect_done(glib::clone!(
+        #[weak]
+        card,
+        #[weak]
+        actions,
+        #[weak]
+        reveal,
+        move |_| {
+            card.set_vertical_offset(0.0);
+            card.set_opacity(1.0);
+            actions.set_sensitive(true);
+            reveal.grab_focus();
+        }
+    ));
+    *current_animation.borrow_mut() = Some(animation.clone());
     animation.play();
-    *current_animation.borrow_mut() = Some(animation);
+}
+
+fn animate_card_exit(
+    card: &FlipCard,
+    direction: f64,
+    current_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
+    on_done: impl FnOnce() + 'static,
+) {
+    if !adw::is_animations_enabled(card) {
+        card.set_vertical_offset(0.0);
+        card.set_opacity(1.0);
+        on_done();
+        return;
+    }
+
+    let distance = (card.height() as f64 + 48.0).max(120.0) * direction;
+    let target = adw::CallbackAnimationTarget::new(glib::clone!(
+        #[weak]
+        card,
+        move |value| {
+            card.set_vertical_offset((distance * value) as f32);
+            card.set_opacity(1.0 - value * 0.65);
+        }
+    ));
+    let animation = adw::TimedAnimation::new(card, 0.0, 1.0, 240, target);
+    animation.set_easing(adw::Easing::EaseInCubic);
+    animation.set_follow_enable_animations_setting(true);
+    let on_done = Rc::new(RefCell::new(Some(on_done)));
+    animation.connect_done(move |_| {
+        if let Some(on_done) = on_done.borrow_mut().take() {
+            on_done();
+        }
+    });
+    *current_animation.borrow_mut() = Some(animation.clone());
+    animation.play();
 }
 
 fn animate_confetti(
