@@ -508,7 +508,11 @@ fn open_deck(
         .min_sidebar_width(260.0)
         .max_sidebar_width(360.0)
         .build();
-    let adaptive = adw::BreakpointBin::builder().child(&split).build();
+    let adaptive = adw::BreakpointBin::builder()
+        .child(&split)
+        .width_request(360)
+        .height_request(300)
+        .build();
     let breakpoint = adw::Breakpoint::new(
         adw::BreakpointCondition::parse("max-width: 700px").expect("valid breakpoint"),
     );
@@ -592,11 +596,10 @@ fn open_deck(
                 .split(',')
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            if let Some(id) = editor.borrow().selected
-                && let Some(card) = editor.borrow_mut().deck.card_mut(id)
-            {
+            if mutate_selected_card(&editor, |card| {
                 card.tags = flashcards::model::normalize_tags(tags);
-                set_dirty(&editor, &save_button);
+            }) {
+                save_button.set_sensitive(true);
             }
         }
     ));
@@ -828,20 +831,31 @@ fn connect_text_edit(
             if editor.borrow().updating_form {
                 return;
             }
-            let Some(id) = editor.borrow().selected else {
-                return;
-            };
-            if let Some(card) = editor.borrow_mut().deck.card_mut(id) {
+            if mutate_selected_card(&editor, |card| {
                 update(
                     card,
                     buffer
                         .text(&buffer.start_iter(), &buffer.end_iter(), false)
                         .to_string(),
                 );
-                set_dirty(&editor, &save_button);
+            }) {
+                save_button.set_sensitive(true);
             }
         }
     ));
+}
+
+fn mutate_selected_card(editor: &Rc<RefCell<EditorState>>, update: impl FnOnce(&mut Card)) -> bool {
+    let mut editor = editor.borrow_mut();
+    let Some(id) = editor.selected else {
+        return false;
+    };
+    let Some(card) = editor.deck.card_mut(id) else {
+        return false;
+    };
+    update(card);
+    editor.dirty = true;
+    true
 }
 
 fn connect_move_card(
@@ -1732,4 +1746,32 @@ fn install_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_card_mutation_does_not_nest_refcell_borrows() {
+        let mut deck = Deck::new("Deck");
+        let card = Card::new("Old front", "Back");
+        let card_id = card.id;
+        deck.cards.push(card);
+        let editor = Rc::new(RefCell::new(EditorState {
+            path: PathBuf::from("deck.json"),
+            deck,
+            selected: Some(card_id),
+            dirty: false,
+            updating_form: false,
+            loaded_modified: None,
+        }));
+
+        assert!(mutate_selected_card(&editor, |card| {
+            card.front = "New front".to_owned();
+        }));
+        let editor = editor.borrow();
+        assert!(editor.dirty);
+        assert_eq!(editor.deck.cards[0].front, "New front");
+    }
 }
