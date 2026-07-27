@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://polli.page/flashcards/deck.schema.json",
+  "title": "Flashcards deck",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "title", "cards"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "$ref": "#/$defs/uuid" },
+    "title": { "type": "string", "minLength": 1 },
+    "description": { "type": "string" },
+    "cards": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/card" }
+    },
+    "sessions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/session" }
+    }
+  },
+  "$defs": {
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "rating": {
+      "type": "string",
+      "enum": ["again", "good"]
+    },
+    "card": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "front", "back", "stats"],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "front": { "type": "string", "minLength": 1 },
+        "back": { "type": "string", "minLength": 1 },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^[^A-Z]*$"
+          }
+        },
+        "stats": { "$ref": "#/$defs/cardStats" }
+      }
+    },
+    "cardStats": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["again_count", "good_count", "current_good_streak"],
+      "properties": {
+        "again_count": { "type": "integer", "minimum": 0 },
+        "good_count": { "type": "integer", "minimum": 0 },
+        "current_good_streak": { "type": "integer", "minimum": 0 },
+        "last_reviewed": { "$ref": "#/$defs/timestamp" },
+        "history": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ratingEvent" }
+        }
+      }
+    },
+    "ratingEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "session_id",
+        "timestamp",
+        "local_date",
+        "utc_offset_minutes",
+        "rating"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "session_id": { "$ref": "#/$defs/uuid" },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "local_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "utc_offset_minutes": {
+          "type": "integer",
+          "minimum": -1440,
+          "maximum": 1440
+        },
+        "rating": { "$ref": "#/$defs/rating" }
+      }
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "started_at",
+        "completed_at",
+        "order",
+        "again_count",
+        "good_count",
+        "unique_card_count",
+        "completed"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/uuid" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "completed_at": { "$ref": "#/$defs/timestamp" },
+        "order": {
+          "type": "string",
+          "enum": ["sequential", "shuffled"]
+        },
+        "tag_filter": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "again_count": { "type": "integer", "minimum": 0 },
+        "good_count": { "type": "integer", "minimum": 0 },
+        "unique_card_count": { "type": "integer", "minimum": 0 },
+        "completed": { "const": true }
+      }
+    }
+  }
+}

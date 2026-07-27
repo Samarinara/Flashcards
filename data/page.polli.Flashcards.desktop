@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Flashcards
+Comment=Create and study JSON flashcard decks
+Exec=flashcards
+Icon=page.polli.Flashcards
+Terminal=false
+Type=Application
+Categories=Education;GNOME;GTK;
+Keywords=flashcards;study;learning;json;
+StartupNotify=true
+DBusActivatable=false
+MimeType=application/json;

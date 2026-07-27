@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="page.polli.Flashcards" path="/page/polli/Flashcards/">
+    <key name="library-folder" type="s">
+      <default>''</default>
+      <summary>Flashcard library folder</summary>
+      <description>An empty value uses the Flashcards folder in Documents.</description>
+    </key>
+    <key name="ask-editor-each-time" type="b">
+      <default>false</default>
+      <summary>Ask which text editor to use</summary>
+    </key>
+  </schema>
+</schemalist>

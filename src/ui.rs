@@ -133,7 +133,7 @@ fn install_actions(
                 .developer_name("Polli")
                 .version(env!("CARGO_PKG_VERSION"))
                 .comments("Study human-readable JSON decks.")
-                .website("https://github.com/samarinara/flashcards")
+                .website("https://polli.page")
                 .license_type(gtk::License::MitX11)
                 .build()
                 .present(Some(&window));

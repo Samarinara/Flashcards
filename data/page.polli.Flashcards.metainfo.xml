@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>page.polli.Flashcards</id>
+  <name>Flashcards</name>
+  <summary>Create and study portable JSON flashcards</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Flashcards turns human-readable JSON files into focused study sessions.
+      Create and organize cards natively, or open the source in your preferred
+      text editor.
+    </p>
+    <p>
+      Review history stays inside each portable deck. Search and tags keep large
+      decks manageable, while simple Again and Good ratings make study fast.
+    </p>
+  </description>
+  <launchable type="desktop-id">page.polli.Flashcards.desktop</launchable>
+  <developer id="page.polli">
+    <name>Polli</name>
+  </developer>
+  <url type="homepage">https://polli.page</url>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-27">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+</component>
