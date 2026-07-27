@@ -1441,6 +1441,18 @@ fn import_dialog(
 
 fn launch_editor(window: &adw::ApplicationWindow, state: &AppState, path: &Path) {
     let file = gio::File::for_path(path);
+    if !is_flatpak()
+        && !state.preferences.borrow().ask_editor_each_time
+        && let Some(app_id) = state.preferences.borrow().editor_app_id.clone()
+        && let Some(app) = gio::AppInfo::all()
+            .into_iter()
+            .find(|app| app.id().as_deref() == Some(app_id.as_str()))
+    {
+        if let Err(error) = app.launch(&[file], gio::AppLaunchContext::NONE) {
+            toast_window(window, &format!("Couldn’t open the editor: {error}"));
+        }
+        return;
+    }
     let launcher = gtk::FileLauncher::new(Some(&file));
     launcher.set_always_ask(state.preferences.borrow().ask_editor_each_time);
     launcher.set_writable(true);
@@ -1481,10 +1493,46 @@ fn show_preferences(
         .build();
     let ask = adw::SwitchRow::builder()
         .title("Ask Which Editor to Use")
-        .subtitle("Otherwise, use the system default for JSON files")
+        .subtitle("Otherwise, use the preferred or system-default editor")
         .active(state.preferences.borrow().ask_editor_each_time)
         .build();
     editor_group.add(&ask);
+    if !is_flatpak() {
+        let editor_name = selected_editor_name(&state.preferences.borrow())
+            .unwrap_or_else(|| "System Default".to_owned());
+        let editor = adw::ActionRow::builder()
+            .title("Preferred Editor")
+            .subtitle(&editor_name)
+            .activatable(true)
+            .build();
+        editor.add_suffix(&gtk::Image::builder().icon_name("go-next-symbolic").build());
+        let reset = gtk::Button::builder()
+            .label("Use System Default")
+            .halign(gtk::Align::Start)
+            .build();
+        editor_group.add(&editor);
+        editor_group.add(&reset);
+        editor.connect_activated(glib::clone!(
+            #[weak]
+            window,
+            #[weak]
+            editor,
+            #[strong]
+            state,
+            move |_| choose_editor(&window, &editor, &state)
+        ));
+        reset.connect_clicked(glib::clone!(
+            #[weak]
+            editor,
+            #[strong]
+            state,
+            move |_| {
+                state.preferences.borrow_mut().editor_app_id = None;
+                let _ = state.preferences.borrow().save();
+                editor.set_subtitle("System Default");
+            }
+        ));
+    }
     page.add(&editor_group);
     dialog.add(&page);
 
@@ -1563,6 +1611,46 @@ fn install_monitor(
         }
     ));
     *state.monitor.borrow_mut() = Some(monitor);
+}
+
+#[allow(deprecated)]
+fn choose_editor(window: &adw::ApplicationWindow, row: &adw::ActionRow, state: &AppState) {
+    let chooser = gtk::AppChooserDialog::for_content_type(
+        Some(window),
+        gtk::DialogFlags::MODAL,
+        "application/json",
+    );
+    chooser.set_heading("Choose a text editor for deck JSON");
+    chooser.connect_response(glib::clone!(
+        #[weak]
+        row,
+        #[strong]
+        state,
+        move |dialog, response| {
+            if response == gtk::ResponseType::Ok
+                && let Some(app) = dialog.app_info()
+                && let Some(id) = app.id()
+            {
+                state.preferences.borrow_mut().editor_app_id = Some(id.to_string());
+                let _ = state.preferences.borrow().save();
+                row.set_subtitle(&app.display_name());
+            }
+            dialog.close();
+        }
+    ));
+    chooser.present();
+}
+
+fn selected_editor_name(preferences: &Preferences) -> Option<String> {
+    let wanted = preferences.editor_app_id.as_deref()?;
+    gio::AppInfo::all()
+        .into_iter()
+        .find(|app| app.id().as_deref() == Some(wanted))
+        .map(|app| app.display_name().to_string())
+}
+
+fn is_flatpak() -> bool {
+    Path::new("/.flatpak-info").exists()
 }
 
 fn toast_window(window: &adw::ApplicationWindow, message: &str) {

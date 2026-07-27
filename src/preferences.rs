@@ -11,6 +11,8 @@ pub struct Preferences {
     pub library: PathBuf,
     #[serde(default)]
     pub ask_editor_each_time: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_app_id: Option<String>,
 }
 
 impl Default for Preferences {
@@ -20,6 +22,7 @@ impl Default for Preferences {
         Self {
             library: documents.join("Flashcards"),
             ask_editor_each_time: false,
+            editor_app_id: None,
         }
     }
 }
