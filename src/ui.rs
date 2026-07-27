@@ -1189,7 +1189,14 @@ fn show_study(
     content.append(&buttons);
     toolbar.set_content(Some(&content));
 
-    update_study_card(&deck, &session.borrow(), &prompt, &answer, &progress);
+    update_study_card(
+        &deck,
+        &session.borrow(),
+        &prompt,
+        &answer,
+        &progress,
+        &again,
+    );
     reveal.connect_clicked(glib::clone!(
         #[weak]
         answer,
@@ -1308,7 +1315,18 @@ fn connect_rating(
                 navigation.pop();
                 return;
             }
-            update_study_card(&snapshot, &session.borrow(), &prompt, &answer, &progress);
+            let again_button = match rating {
+                Rating::Again => button,
+                Rating::Good => &other_rating,
+            };
+            update_study_card(
+                &snapshot,
+                &session.borrow(),
+                &prompt,
+                &answer,
+                &progress,
+                again_button,
+            );
             answer.set_visible(false);
             button.set_visible(false);
             other_rating.set_visible(false);
@@ -1324,6 +1342,7 @@ fn update_study_card(
     prompt: &gtk::Label,
     answer: &gtk::Label,
     progress: &gtk::ProgressBar,
+    again: &gtk::Button,
 ) {
     if let Some(card) = session
         .current_card()
@@ -1341,11 +1360,15 @@ fn update_study_card(
     let current = (study_progress.completed + 1).min(study_progress.total);
     match study_progress.phase {
         StudyPhase::FirstPass => {
+            again.set_label("Again");
+            again.set_tooltip_text(Some("Show this card once more at the end"));
             progress.remove_css_class("warning");
             progress.set_text(Some(&format!("{current} of {}", study_progress.total)));
             progress.set_tooltip_text(Some("Initial card pass"));
         }
         StudyPhase::MissedCards => {
+            again.set_label("Bad");
+            again.set_tooltip_text(Some("Mark as incorrect without showing it again"));
             progress.add_css_class("warning");
             progress.set_text(Some(&format!(
                 "Reviewing missed cards — {current} of {}",
