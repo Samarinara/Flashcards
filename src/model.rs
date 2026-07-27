@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Deck {
     pub schema_version: u32,
     pub id: Uuid,
@@ -19,6 +20,7 @@ pub struct Deck {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Card {
     pub id: Uuid,
     pub front: String,
@@ -30,6 +32,7 @@ pub struct Card {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CardStats {
     #[serde(default)]
     pub again_count: u64,
@@ -51,6 +54,7 @@ pub enum Rating {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct RatingEvent {
     pub id: Uuid,
     pub session_id: Uuid,
@@ -68,6 +72,7 @@ pub enum StudyOrder {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SessionSummary {
     pub id: Uuid,
     pub started_at: DateTime<Utc>,

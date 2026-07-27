@@ -134,7 +134,7 @@ fn install_actions(
                 .version(env!("CARGO_PKG_VERSION"))
                 .comments("Study human-readable JSON decks.")
                 .website("https://github.com/samarinara/flashcards")
-                .license_type(gtk::License::Gpl30)
+                .license_type(gtk::License::MitX11)
                 .build()
                 .present(Some(&window));
         }
@@ -387,6 +387,11 @@ fn open_deck(
         .tooltip_text("Move Deck to Trash")
         .build();
     header.pack_end(&trash_deck);
+    let show_cards = gtk::Button::builder()
+        .icon_name("sidebar-show-symbolic")
+        .tooltip_text("Show Card List")
+        .build();
+    header.pack_start(&show_cards);
 
     let title = gtk::Entry::builder()
         .text(&editor.borrow().deck.title)
@@ -497,15 +502,24 @@ fn open_deck(
     detail_stack.add_named(&form_scroll, Some("form"));
     detail_stack.set_visible_child_name("empty");
 
-    let split = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&sidebar)
-        .end_child(&detail_stack)
-        .position(320)
-        .shrink_start_child(false)
-        .wide_handle(true)
+    let split = adw::OverlaySplitView::builder()
+        .sidebar(&sidebar)
+        .content(&detail_stack)
+        .min_sidebar_width(260.0)
+        .max_sidebar_width(360.0)
         .build();
-    toolbar.set_content(Some(&split));
+    let adaptive = adw::BreakpointBin::builder().child(&split).build();
+    let breakpoint = adw::Breakpoint::new(
+        adw::BreakpointCondition::parse("max-width: 700px").expect("valid breakpoint"),
+    );
+    breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+    adaptive.add_breakpoint(breakpoint);
+    toolbar.set_content(Some(&adaptive));
+    show_cards.connect_clicked(glib::clone!(
+        #[weak]
+        split,
+        move |_| split.set_show_sidebar(true)
+    ));
 
     populate_card_list(&card_list, &editor.borrow().deck, "");
     search.connect_search_changed(glib::clone!(
@@ -524,6 +538,8 @@ fn open_deck(
         tags,
         #[weak]
         detail_stack,
+        #[weak]
+        split,
         #[strong]
         editor,
         move |_, row| {
@@ -552,6 +568,9 @@ fn open_deck(
             let mut editor = editor.borrow_mut();
             editor.selected = Some(id);
             editor.updating_form = false;
+            if split.is_collapsed() {
+                split.set_show_sidebar(false);
+            }
         }
     ));
 

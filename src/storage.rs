@@ -223,4 +223,15 @@ mod tests {
             [LibraryEntry::Invalid { .. }]
         ));
     }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("future.json");
+        let deck = Deck::new("Deck");
+        let mut value = serde_json::to_value(deck).unwrap();
+        value["surprise"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        assert!(matches!(load_deck(&path), Err(DeckFileError::Json(_))));
+    }
 }
