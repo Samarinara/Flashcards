@@ -1310,16 +1310,30 @@ fn show_study(
         .margin_bottom(28)
         .child(&actions)
         .build();
+    let question_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    question_content.append(&question_label);
+    question_content.append(&prompt);
+    let question_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&question_content)
+        .build();
     let question_face = gtk::Box::new(gtk::Orientation::Vertical, 0);
     question_face.add_css_class("card");
     question_face.add_css_class("study-card");
-    question_face.append(&question_label);
-    question_face.append(&prompt);
+    question_face.append(&question_scroll);
+    let answer_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    answer_content.append(&answer_label);
+    answer_content.append(&answer);
+    let answer_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&answer_content)
+        .build();
     let answer_face = gtk::Box::new(gtk::Orientation::Vertical, 0);
     answer_face.add_css_class("card");
     answer_face.add_css_class("study-card");
-    answer_face.append(&answer_label);
-    answer_face.append(&answer);
+    answer_face.append(&answer_scroll);
     let faces = gtk::Stack::builder()
         .hhomogeneous(true)
         .vhomogeneous(true)
@@ -1329,26 +1343,25 @@ fn show_study(
     faces.add_named(&answer_face, Some("answer"));
     faces.set_visible_child_name("question");
     let card = FlipCard::new(&faces);
+    let card_aspect = gtk::AspectFrame::builder()
+        .ratio(2.0 / 3.0)
+        .obey_child(false)
+        .xalign(0.5)
+        .yalign(0.5)
+        .child(&card)
+        .build();
     let card_clamp = adw::Clamp::builder()
-        .maximum_size(720)
+        .maximum_size(420)
         .margin_top(24)
         .margin_bottom(24)
         .margin_start(24)
         .margin_end(24)
-        .child(&card)
-        .build();
-    let card_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    card_area.set_vexpand(true);
-    card_area.set_valign(gtk::Align::Center);
-    card_area.append(&card_clamp);
-    let scrolled = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
-        .child(&card_area)
+        .child(&card_aspect)
         .build();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&progress_clamp);
-    content.append(&scrolled);
+    content.append(&card_clamp);
     content.append(&actions_clamp);
     let confetti_progress = Rc::new(Cell::new(1.0));
     let confetti = gtk::DrawingArea::builder()
@@ -2120,8 +2133,7 @@ fn install_css() {
     provider.load_from_string(
         "
         .study-card {
-            min-height: 260px;
-            padding: 36px;
+            padding: 24px;
             border-radius: 18px;
         }
         .study-progress trough,
