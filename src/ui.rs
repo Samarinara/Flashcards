@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fs,
     path::{Path, PathBuf},
     rc::Rc,
@@ -1151,57 +1151,144 @@ fn show_study(
     let session = Rc::new(RefCell::new(session));
     let path = Rc::new(path.to_owned());
     let (toolbar, _header) = page_shell("Study", true);
+    let phase = gtk::Label::builder()
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .css_classes(["heading"])
+        .build();
+    let counter = gtk::Label::builder()
+        .halign(gtk::Align::End)
+        .css_classes(["dim-label"])
+        .build();
+    let status = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    status.append(&phase);
+    status.append(&counter);
     let progress = gtk::ProgressBar::builder()
-        .show_text(true)
+        .css_classes(["study-progress"])
+        .build();
+    let progress_box = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    progress_box.append(&status);
+    progress_box.append(&progress);
+    let progress_clamp = adw::Clamp::builder()
+        .maximum_size(720)
         .margin_top(18)
-        .margin_start(18)
-        .margin_end(18)
+        .margin_start(24)
+        .margin_end(24)
+        .child(&progress_box)
+        .build();
+    let question_label = gtk::Label::builder()
+        .label("Question")
+        .halign(gtk::Align::Start)
+        .css_classes(["caption", "dim-label"])
         .build();
     let prompt = gtk::Label::builder()
         .wrap(true)
         .justify(gtk::Justification::Center)
         .selectable(true)
-        .css_classes(["title-1", "study-card"])
+        .css_classes(["title-1"])
+        .margin_top(18)
+        .margin_bottom(6)
+        .build();
+    let answer_label = gtk::Label::builder()
+        .label("Answer")
+        .halign(gtk::Align::Start)
+        .css_classes(["caption", "dim-label"])
         .build();
     let answer = gtk::Label::builder()
         .wrap(true)
         .justify(gtk::Justification::Center)
         .selectable(true)
-        .css_classes(["title-2", "dim-label"])
-        .visible(false)
+        .css_classes(["title-2"])
+        .margin_top(18)
+        .build();
+    let answer_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    answer_box.add_css_class("study-answer");
+    answer_box.append(&answer_label);
+    answer_box.append(&answer);
+    let answer_revealer = gtk::Revealer::builder()
+        .transition_type(gtk::RevealerTransitionType::Crossfade)
+        .transition_duration(180)
+        .child(&answer_box)
         .build();
     let reveal = gtk::Button::builder()
-        .label("Reveal Answer")
+        .label("Show Answer")
         .css_classes(["suggested-action", "pill"])
+        .hexpand(true)
         .build();
     let again = gtk::Button::builder()
         .label("Again")
         .css_classes(["destructive-action", "pill"])
-        .visible(false)
+        .hexpand(true)
         .build();
     let good = gtk::Button::builder()
         .label("Good")
         .css_classes(["suggested-action", "pill"])
+        .hexpand(true)
+        .build();
+    let ratings = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    ratings.set_homogeneous(true);
+    ratings.append(&again);
+    ratings.append(&good);
+    let actions = gtk::Stack::builder()
+        .transition_type(gtk::StackTransitionType::Crossfade)
+        .transition_duration(160)
+        .build();
+    actions.add_named(&reveal, Some("reveal"));
+    actions.add_named(&ratings, Some("ratings"));
+    actions.set_visible_child_name("reveal");
+    let actions_clamp = adw::Clamp::builder()
+        .maximum_size(520)
+        .margin_start(24)
+        .margin_end(24)
+        .margin_bottom(28)
+        .child(&actions)
+        .build();
+    let card = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card.add_css_class("card");
+    card.add_css_class("study-card");
+    card.append(&question_label);
+    card.append(&prompt);
+    card.append(&answer_revealer);
+    let card_clamp = adw::Clamp::builder()
+        .maximum_size(720)
+        .margin_top(24)
+        .margin_bottom(24)
+        .margin_start(24)
+        .margin_end(24)
+        .child(&card)
+        .build();
+    let card_area = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    card_area.set_vexpand(true);
+    card_area.set_valign(gtk::Align::Center);
+    card_area.append(&card_clamp);
+    let scrolled = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&card_area)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.append(&progress_clamp);
+    content.append(&scrolled);
+    content.append(&actions_clamp);
+    let confetti_progress = Rc::new(Cell::new(1.0));
+    let confetti = gtk::DrawingArea::builder()
+        .can_target(false)
+        .hexpand(true)
+        .vexpand(true)
         .visible(false)
         .build();
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    buttons.set_halign(gtk::Align::Center);
-    buttons.append(&again);
-    buttons.append(&reveal);
-    buttons.append(&good);
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    content.set_margin_bottom(32);
-    content.append(&progress);
-    let card = gtk::Box::new(gtk::Orientation::Vertical, 24);
-    card.set_vexpand(true);
-    card.set_valign(gtk::Align::Center);
-    card.set_margin_start(36);
-    card.set_margin_end(36);
-    card.append(&prompt);
-    card.append(&answer);
-    content.append(&card);
-    content.append(&buttons);
-    toolbar.set_content(Some(&content));
+    confetti.set_draw_func({
+        let confetti_progress = Rc::clone(&confetti_progress);
+        move |_, context, width, height| {
+            draw_confetti(context, width, height, confetti_progress.get());
+        }
+    });
+    let overlay = gtk::Overlay::new();
+    overlay.set_child(Some(&content));
+    overlay.add_overlay(&confetti);
+    let card_animation = Rc::new(RefCell::new(None));
+    let confetti_animation = Rc::new(RefCell::new(None));
+    toolbar.set_content(Some(&overlay));
 
     update_study_card(
         &deck,
@@ -1209,22 +1296,20 @@ fn show_study(
         &prompt,
         &answer,
         &progress,
+        &phase,
+        &counter,
         &again,
     );
     reveal.connect_clicked(glib::clone!(
         #[weak]
-        answer,
+        answer_revealer,
         #[weak]
-        reveal,
-        #[weak]
-        again,
+        actions,
         #[weak]
         good,
         move |_| {
-            answer.set_visible(true);
-            reveal.set_visible(false);
-            again.set_visible(true);
-            good.set_visible(true);
+            answer_revealer.set_reveal_child(true);
+            actions.set_visible_child_name("ratings");
             good.grab_focus();
         }
     ));
@@ -1239,6 +1324,15 @@ fn show_study(
         &prompt,
         &answer,
         &progress,
+        &phase,
+        &counter,
+        &card,
+        &card_animation,
+        &confetti,
+        &confetti_progress,
+        &confetti_animation,
+        &answer_revealer,
+        &actions,
         &reveal,
         &good,
     );
@@ -1253,11 +1347,21 @@ fn show_study(
         &prompt,
         &answer,
         &progress,
+        &phase,
+        &counter,
+        &card,
+        &card_animation,
+        &confetti,
+        &confetti_progress,
+        &confetti_animation,
+        &answer_revealer,
+        &actions,
         &reveal,
         &again,
     );
     let page = adw::NavigationPage::new(&toolbar, "Study");
     navigation.push(&page);
+    animate_card_entrance(&card, &card_animation);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1272,6 +1376,15 @@ fn connect_rating(
     prompt: &gtk::Label,
     answer: &gtk::Label,
     progress: &gtk::ProgressBar,
+    phase: &gtk::Label,
+    counter: &gtk::Label,
+    card: &gtk::Box,
+    card_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
+    confetti: &gtk::DrawingArea,
+    confetti_progress: &Rc<Cell<f64>>,
+    confetti_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
+    answer_revealer: &gtk::Revealer,
+    actions: &gtk::Stack,
     reveal: &gtk::Button,
     other_rating: &gtk::Button,
 ) {
@@ -1286,6 +1399,24 @@ fn connect_rating(
         answer,
         #[weak]
         progress,
+        #[weak]
+        phase,
+        #[weak]
+        counter,
+        #[weak]
+        card,
+        #[weak]
+        confetti,
+        #[weak]
+        answer_revealer,
+        #[weak]
+        actions,
+        #[strong]
+        card_animation,
+        #[strong]
+        confetti_progress,
+        #[strong]
+        confetti_animation,
         #[weak]
         reveal,
         #[weak]
@@ -1339,23 +1470,30 @@ fn connect_rating(
                 &prompt,
                 &answer,
                 &progress,
+                &phase,
+                &counter,
                 again_button,
             );
-            answer.set_visible(false);
-            button.set_visible(false);
-            other_rating.set_visible(false);
-            reveal.set_visible(true);
+            answer_revealer.set_reveal_child(false);
+            actions.set_visible_child_name("reveal");
+            animate_card_entrance(&card, &card_animation);
+            if rating == Rating::Good {
+                animate_confetti(&confetti, &confetti_progress, &confetti_animation);
+            }
             reveal.grab_focus();
         }
     ));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn update_study_card(
     deck: &Deck,
     session: &StudySession,
     prompt: &gtk::Label,
     answer: &gtk::Label,
     progress: &gtk::ProgressBar,
+    phase: &gtk::Label,
+    counter: &gtk::Label,
     again: &gtk::Button,
 ) {
     if let Some(card) = session
@@ -1377,19 +1515,121 @@ fn update_study_card(
             again.set_label("Again");
             again.set_tooltip_text(Some("Show this card once more at the end"));
             progress.remove_css_class("warning");
-            progress.set_text(Some(&format!("{current} of {}", study_progress.total)));
+            phase.set_text("First pass");
+            counter.set_text(&format!("Card {current} of {}", study_progress.total));
             progress.set_tooltip_text(Some("Initial card pass"));
         }
         StudyPhase::MissedCards => {
             again.set_label("Bad");
             again.set_tooltip_text(Some("Mark as incorrect without showing it again"));
             progress.add_css_class("warning");
-            progress.set_text(Some(&format!(
-                "Reviewing missed cards — {current} of {}",
-                study_progress.total
-            )));
+            phase.set_text("Missed cards");
+            counter.set_text(&format!("Card {current} of {}", study_progress.total));
             progress.set_tooltip_text(Some("Reviewing cards rated Again"));
         }
+    }
+}
+
+fn animate_card_entrance(
+    card: &gtk::Box,
+    current_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
+) {
+    let target = adw::CallbackAnimationTarget::new(glib::clone!(
+        #[weak]
+        card,
+        move |value| card.set_opacity(value)
+    ));
+    let animation = adw::TimedAnimation::new(card, 0.45, 1.0, 180, target);
+    animation.set_easing(adw::Easing::EaseOutCubic);
+    animation.set_follow_enable_animations_setting(true);
+    animation.play();
+    *current_animation.borrow_mut() = Some(animation);
+}
+
+fn animate_confetti(
+    layer: &gtk::DrawingArea,
+    progress: &Rc<Cell<f64>>,
+    current_animation: &Rc<RefCell<Option<adw::TimedAnimation>>>,
+) {
+    if !adw::is_animations_enabled(layer) {
+        return;
+    }
+    progress.set(0.0);
+    layer.set_visible(true);
+    let target = adw::CallbackAnimationTarget::new(glib::clone!(
+        #[weak]
+        layer,
+        #[strong]
+        progress,
+        move |value| {
+            progress.set(value);
+            layer.queue_draw();
+        }
+    ));
+    let animation = adw::TimedAnimation::new(layer, 0.0, 1.0, 650, target);
+    animation.set_easing(adw::Easing::EaseOutCubic);
+    animation.set_follow_enable_animations_setting(true);
+    animation.connect_done(glib::clone!(
+        #[weak]
+        layer,
+        move |_| layer.set_visible(false)
+    ));
+    animation.play();
+    *current_animation.borrow_mut() = Some(animation);
+}
+
+fn draw_confetti(context: &gtk::cairo::Context, width: i32, height: i32, progress: f64) {
+    const COLORS: [(f64, f64, f64); 6] = [
+        (0.208, 0.518, 0.894),
+        (0.200, 0.820, 0.478),
+        (0.965, 0.827, 0.176),
+        (1.000, 0.471, 0.000),
+        (0.569, 0.255, 0.675),
+        (0.835, 0.380, 0.600),
+    ];
+    const PARTICLES: [(f64, f64, f64, f64); 18] = [
+        (-0.48, -1.30, -1.8, 5.0),
+        (-0.40, -0.95, 1.2, 4.0),
+        (-0.34, -1.55, -0.7, 5.0),
+        (-0.28, -1.15, 2.0, 3.5),
+        (-0.20, -1.42, -1.3, 4.5),
+        (-0.13, -1.05, 0.8, 4.0),
+        (-0.07, -1.62, -2.1, 5.0),
+        (-0.02, -1.22, 1.5, 3.5),
+        (0.05, -1.48, -0.9, 4.5),
+        (0.11, -1.08, 1.8, 4.0),
+        (0.17, -1.58, -1.6, 5.0),
+        (0.23, -1.18, 0.6, 3.5),
+        (0.29, -1.38, 2.2, 4.5),
+        (0.35, -1.02, -1.1, 4.0),
+        (0.41, -1.50, 1.4, 5.0),
+        (0.47, -1.20, -2.0, 3.5),
+        (-0.53, -1.08, 0.9, 4.0),
+        (0.54, -1.34, -0.5, 4.5),
+    ];
+
+    let width = f64::from(width);
+    let height = f64::from(height);
+    let spread = width.min(620.0);
+    let origin_x = width / 2.0;
+    let origin_y = height * 0.78;
+    let alpha = (1.0 - ((progress - 0.52) / 0.48).clamp(0.0, 1.0)) * 0.9;
+
+    for (index, &(velocity_x, velocity_y, spin, size)) in PARTICLES.iter().enumerate() {
+        let x = origin_x + velocity_x * spread * progress;
+        let y = origin_y + velocity_y * 150.0 * progress + 210.0 * progress * progress;
+        let (red, green, blue) = COLORS[index % COLORS.len()];
+        let _ = context.save();
+        context.translate(x, y);
+        context.rotate(spin * progress);
+        context.set_source_rgba(red, green, blue, alpha);
+        if index % 3 == 0 {
+            context.arc(0.0, 0.0, size / 2.0, 0.0, std::f64::consts::TAU);
+        } else {
+            context.rectangle(-size / 2.0, -size, size, size * 2.0);
+        }
+        let _ = context.fill();
+        let _ = context.restore();
     }
 }
 
@@ -1734,7 +1974,19 @@ fn install_css() {
     provider.load_from_string(
         "
         .study-card {
-            padding: 42px;
+            min-height: 260px;
+            padding: 36px;
+            border-radius: 18px;
+        }
+        .study-answer {
+            margin-top: 24px;
+            padding-top: 24px;
+            border-top: 1px solid alpha(@window_fg_color, 0.12);
+        }
+        .study-progress trough,
+        .study-progress progress {
+            min-height: 8px;
+            border-radius: 999px;
         }
         textview {
             min-height: 110px;
