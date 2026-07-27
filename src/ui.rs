@@ -1864,7 +1864,7 @@ fn animate_confetti(
             layer.queue_draw();
         }
     ));
-    let animation = adw::TimedAnimation::new(layer, 0.0, 1.0, 650, target);
+    let animation = adw::TimedAnimation::new(layer, 0.0, 1.0, 1_200, target);
     animation.set_easing(adw::Easing::EaseOutCubic);
     animation.set_follow_enable_animations_setting(true);
     animation.connect_done(glib::clone!(
@@ -1911,7 +1911,7 @@ fn draw_confetti(context: &gtk::cairo::Context, width: i32, height: i32, progres
     let spread = width.min(620.0);
     let origin_x = width / 2.0;
     let origin_y = height * 0.78;
-    let alpha = (1.0 - ((progress - 0.52) / 0.48).clamp(0.0, 1.0)) * 0.9;
+    let alpha = (1.0 - ((progress - 0.66) / 0.34).clamp(0.0, 1.0)) * 0.9;
 
     for (index, &(velocity_x, velocity_y, spin, size)) in PARTICLES.iter().enumerate() {
         let x = origin_x + velocity_x * spread * progress;
