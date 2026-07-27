@@ -1,3 +1,5 @@
-fn main() {
-    println!("Hello, world!");
+mod ui;
+
+fn main() -> libadwaita::glib::ExitCode {
+    ui::run()
 }
