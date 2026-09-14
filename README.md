@@ -36,12 +36,21 @@ meson compile -C build
 meson install -C build
 ```
 
-The Flatpak manifest is intended for local development builds:
+The Flatpak development manifest can be installed locally:
 
 ```sh
 flatpak-builder --user --install --force-clean flatpak-build \
   build-aux/page.polli.Flashcards.Devel.json
 ```
+
+Build an offline release bundle and update repository with:
+
+```sh
+./build-aux/package-flatpak.sh
+```
+
+See [docs/distribution.md](docs/distribution.md) for direct-download and
+self-hosted repository instructions.
 
 See [docs/deck-format.md](docs/deck-format.md) and
 [data/deck.schema.json](data/deck.schema.json) for the stable deck format.

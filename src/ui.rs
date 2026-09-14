@@ -23,6 +23,23 @@ use libadwaita as adw;
 use uuid::Uuid;
 
 const APP_ID: &str = "page.polli.Flashcards";
+const MINIMAL_DECK_EXAMPLE: &str = r#"{
+  "schema_version": 1,
+  "id": "9fb0c901-6118-4a68-a5c5-68381d2ca6f8",
+  "title": "Capitals",
+  "cards": [
+    {
+      "id": "91dbdba2-33ad-424a-8c4d-314fe77369fe",
+      "front": "Portugal",
+      "back": "Lisbon",
+      "stats": {
+        "again_count": 0,
+        "good_count": 0,
+        "current_good_streak": 0
+      }
+    }
+  ]
+}"#;
 
 #[derive(Clone)]
 struct AppState {
@@ -204,6 +221,14 @@ fn install_actions(
     ));
     app.add_action(&action);
 
+    let action = gio::SimpleAction::new("deck-format", None);
+    action.connect_activate(glib::clone!(
+        #[weak]
+        window,
+        move |_, _| show_deck_format(&window)
+    ));
+    app.add_action(&action);
+
     let action = gio::SimpleAction::new("about", None);
     action.connect_activate(glib::clone!(
         #[weak]
@@ -247,6 +272,7 @@ fn show_library(
     header.pack_start(&new_button);
     let menu = gio::Menu::new();
     menu.append(Some("Import Deck…"), Some("app.import"));
+    menu.append(Some("Deck File Format"), Some("app.deck-format"));
     menu.append(Some("Preferences"), Some("app.preferences"));
     menu.append(Some("About Flashcards"), Some("app.about"));
     menu.append(Some("Quit"), Some("app.quit"));
@@ -295,6 +321,44 @@ fn show_library(
 
     let page = adw::NavigationPage::with_tag(&toolbar, "Flashcards", "library");
     navigation.replace(&[page]);
+}
+
+fn show_deck_format(window: &adw::ApplicationWindow) {
+    let example = gtk::Label::builder()
+        .label(MINIMAL_DECK_EXAMPLE)
+        .selectable(true)
+        .xalign(0.0)
+        .yalign(0.0)
+        .css_classes(["monospace"])
+        .build();
+    let frame = gtk::Frame::builder().child(&example).build();
+    frame.set_margin_top(6);
+    frame.set_margin_bottom(6);
+    frame.set_margin_start(6);
+    frame.set_margin_end(6);
+
+    let example_scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .min_content_height(330)
+        .child(&frame)
+        .build();
+
+    let dialog = adw::AlertDialog::builder()
+        .heading("Deck File Format")
+        .body(
+            "Decks are UTF-8 JSON files. A deck requires schema_version, id, title, and cards. \
+             Every card requires id, front, back, and stats; stats requires the three counters \
+             shown below. IDs must be unique UUIDs. Optional description, tags, review history, \
+             and sessions can be omitted. Unknown fields are rejected.",
+        )
+        .extra_child(&example_scroll)
+        .content_width(620)
+        .build();
+    dialog.add_response("close", "Close");
+    dialog.set_default_response(Some("close"));
+    dialog.set_close_response("close");
+    dialog.present(Some(window));
 }
 
 fn refresh_library_list(
@@ -2317,5 +2381,13 @@ mod tests {
         let editor = editor.borrow();
         assert!(editor.dirty);
         assert_eq!(editor.deck.cards[0].front, "New front");
+    }
+
+    #[test]
+    fn menu_deck_example_is_valid() {
+        let deck: Deck =
+            serde_json::from_str(MINIMAL_DECK_EXAMPLE).expect("example should deserialize");
+
+        assert!(deck.validate().is_empty());
     }
 }

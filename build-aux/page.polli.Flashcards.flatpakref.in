@@ -1,0 +1,10 @@
+[Flatpak Ref]
+Version=1
+Name=page.polli.Flashcards
+Branch=stable
+Title=Flashcards
+Url=@REPOSITORY_URL@
+GPGKey=@BASE64_GPG_PUBLIC_KEY@
+IsRuntime=false
+RuntimeRepo=@RUNTIME_REPOSITORY_FILE_URL@
+DeploySideloadCollectionID=page.polli.Flatpaks

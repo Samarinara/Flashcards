@@ -1,0 +1,10 @@
+[Flatpak Repo]
+Version=1
+Title=Polli Apps
+Url=@REPOSITORY_URL@
+Homepage=https://polli.page/
+Comment=Applications published by Polli
+Description=The official Flatpak repository for Polli applications
+DefaultBranch=stable
+GPGKey=@BASE64_GPG_PUBLIC_KEY@
+DeploySideloadCollectionID=page.polli.Flatpaks
