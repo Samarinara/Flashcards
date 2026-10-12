@@ -45,6 +45,13 @@ const MINIMAL_DECK_EXAMPLE: &str = r#"{
 struct AppState {
     preferences: Rc<RefCell<Preferences>>,
     monitor: Rc<RefCell<Option<gio::FileMonitor>>>,
+    editor_guard: Rc<RefCell<Option<EditorGuard>>>,
+}
+
+#[derive(Clone)]
+struct EditorGuard {
+    editor: Rc<RefCell<EditorState>>,
+    save_button: glib::WeakRef<gtk::Button>,
 }
 
 struct EditorState {
@@ -101,8 +108,9 @@ mod flip_card {
             snapshot.save();
             snapshot.translate(&gtk::graphene::Point::new(0.0, self.vertical_offset.get()));
             snapshot.translate(&center);
-            snapshot.perspective(900.0);
-            snapshot.rotate_3d(self.angle.get(), &gtk::graphene::Vec3::new(0.0, 1.0, 0.0));
+            // A 2D flip also works with GTK's software renderer, which cannot
+            // render perspective nodes and would display a pink rectangle.
+            snapshot.scale(self.angle.get().to_radians().cos().abs(), 1.0);
             snapshot.translate(&inverse_center);
             widget.snapshot_child(&child, snapshot);
             snapshot.restore();
@@ -159,12 +167,88 @@ fn build_window(app: &adw::Application) {
     let state = AppState {
         preferences: Rc::new(RefCell::new(Preferences::load())),
         monitor: Rc::new(RefCell::new(None)),
+        editor_guard: Rc::new(RefCell::new(None)),
     };
     let _ = fs::create_dir_all(&state.preferences.borrow().library);
     install_actions(app, &window, &navigation, &state);
     show_library(&navigation, &window, &state);
     install_monitor(&navigation, &window, &state);
+    window.connect_close_request(glib::clone!(
+        #[strong]
+        state,
+        move |window| {
+            let dirty = state
+                .editor_guard
+                .borrow()
+                .as_ref()
+                .is_some_and(|guard| guard.editor.borrow().dirty);
+            if !dirty {
+                return glib::Propagation::Proceed;
+            }
+            let weak_window = window.downgrade();
+            leave_editor(window, &state, move || {
+                if let Some(window) = weak_window.upgrade() {
+                    window.close();
+                }
+            });
+            glib::Propagation::Stop
+        }
+    ));
     window.present();
+}
+
+// All app-level exits use the same save/discard decision as editor navigation.
+fn leave_editor(window: &adw::ApplicationWindow, state: &AppState, next: impl Fn() + 'static) {
+    let guard = state.editor_guard.borrow().clone();
+    let Some(guard) = guard.filter(|guard| guard.editor.borrow().dirty) else {
+        next();
+        return;
+    };
+    let dialog = adw::AlertDialog::builder()
+        .heading("Save Changes?")
+        .body("This deck has unsaved changes. Save them before leaving?")
+        .build();
+    dialog.add_response("cancel", "Keep Editing");
+    dialog.add_response("discard", "Discard Changes");
+    dialog.add_response("save", "Save");
+    dialog.set_response_appearance("discard", adw::ResponseAppearance::Destructive);
+    dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+    dialog.set_default_response(Some("save"));
+    dialog.set_close_response("cancel");
+    dialog.connect_response(
+        None,
+        glib::clone!(
+            #[weak]
+            window,
+            move |_, response| {
+                match response {
+                    "discard" => {
+                        let path = guard.editor.borrow().path.clone();
+                        if let Ok(deck) = storage::load_deck(&path) {
+                            let mut editor = guard.editor.borrow_mut();
+                            editor.deck = deck;
+                            editor.selected = None;
+                            editor.loaded_modified = modified_time(&path);
+                        }
+                        guard.editor.borrow_mut().dirty = false;
+                        if let Some(button) = guard.save_button.upgrade() {
+                            button.set_sensitive(false);
+                        }
+                        next();
+                    }
+                    "save" => {
+                        if let Some(button) = guard.save_button.upgrade()
+                            && save_editor(&window, &guard.editor, &button)
+                        {
+                            next();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        ),
+    );
+    dialog.present(Some(window));
 }
 
 fn install_actions(
@@ -193,7 +277,19 @@ fn install_actions(
         navigation,
         #[strong]
         state,
-        move |_, _| create_deck_dialog(&window, &navigation, &state)
+        move |_, _| leave_editor(
+            &window,
+            &state,
+            glib::clone!(
+                #[weak]
+                window,
+                #[weak]
+                navigation,
+                #[strong]
+                state,
+                move || create_deck_dialog(&window, &navigation, &state)
+            )
+        )
     ));
     app.add_action(&action);
 
@@ -205,7 +301,19 @@ fn install_actions(
         navigation,
         #[strong]
         state,
-        move |_, _| import_dialog(&window, &navigation, &state)
+        move |_, _| leave_editor(
+            &window,
+            &state,
+            glib::clone!(
+                #[weak]
+                window,
+                #[weak]
+                navigation,
+                #[strong]
+                state,
+                move || import_dialog(&window, &navigation, &state)
+            )
+        )
     ));
     app.add_action(&action);
 
@@ -263,6 +371,7 @@ fn show_library(
     window: &adw::ApplicationWindow,
     state: &AppState,
 ) {
+    state.editor_guard.borrow_mut().take();
     let (toolbar, header) = page_shell("Flashcards", false);
     let new_button = gtk::Button::builder()
         .icon_name("list-add-symbolic")
@@ -296,6 +405,7 @@ fn show_library(
     content.append(&search);
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
+        .valign(gtk::Align::Start)
         .css_classes(["boxed-list"])
         .build();
     let scrolled = gtk::ScrolledWindow::builder()
@@ -304,7 +414,11 @@ fn show_library(
         .child(&list)
         .build();
     content.append(&scrolled);
-    toolbar.set_content(Some(&content));
+    let clamp = adw::Clamp::builder()
+        .maximum_size(800)
+        .child(&content)
+        .build();
+    toolbar.set_content(Some(&clamp));
 
     refresh_library_list(&list, window, navigation, state, "");
     search.connect_search_changed(glib::clone!(
@@ -397,13 +511,21 @@ fn refresh_library_list(
                 shown += 1;
                 let today = Local::now().date_naive();
                 let summary = deck.summary(today);
-                let subtitle = format!(
-                    "{} cards  •  {} reviews  •  {:.0}% good  •  {} day streak",
+                let count = format!(
+                    "{} card{}",
                     summary.cards,
-                    summary.reviews,
-                    summary.success_rate * 100.0,
-                    summary.study_day_streak
+                    if summary.cards == 1 { "" } else { "s" }
                 );
+                let subtitle = if summary.reviews == 0 {
+                    format!("{count} · Not studied yet")
+                } else {
+                    format!(
+                        "{} · {:.0}% recalled · {} day streak",
+                        count,
+                        summary.success_rate * 100.0,
+                        summary.study_day_streak
+                    )
+                };
                 let row = adw::ActionRow::builder()
                     .title(glib::markup_escape_text(&deck.title))
                     .subtitle(subtitle)
@@ -468,20 +590,53 @@ fn refresh_library_list(
         }
     }
     if shown == 0 {
-        let row = if query.is_empty() {
-            status_row(
-                "No Decks Yet",
-                "Create a deck or import an existing JSON file.",
-                "view-paged-symbolic",
-            )
-        } else {
-            status_row(
-                "No Matching Decks",
-                "Try a different search.",
-                "system-search-symbolic",
-            )
-        };
+        let empty = adw::StatusPage::builder()
+            .icon_name(if query.is_empty() {
+                "view-paged-symbolic"
+            } else {
+                "system-search-symbolic"
+            })
+            .title(if query.is_empty() {
+                "Your First Deck Starts Here"
+            } else {
+                "No Matching Decks"
+            })
+            .description(if query.is_empty() {
+                "Create a deck to start learning, or import one you already have."
+            } else {
+                "Try a different deck name or description."
+            })
+            .build();
+        if query.is_empty() {
+            let actions = gtk::Box::new(gtk::Orientation::Vertical, 12);
+            actions.set_halign(gtk::Align::Center);
+            actions.append(
+                &gtk::Button::builder()
+                    .label("Create Deck")
+                    .action_name("app.new-deck")
+                    .css_classes(["suggested-action", "pill"])
+                    .build(),
+            );
+            actions.append(
+                &gtk::Button::builder()
+                    .label("Import Deck…")
+                    .action_name("app.import")
+                    .css_classes(["pill"])
+                    .build(),
+            );
+            empty.set_child(Some(&actions));
+        }
+        let row = gtk::ListBoxRow::builder()
+            .selectable(false)
+            .activatable(false)
+            .child(&empty)
+            .build();
         list.append(&row);
+        list.remove_css_class("boxed-list");
+        list.add_css_class("empty-library");
+    } else {
+        list.remove_css_class("empty-library");
+        list.add_css_class("boxed-list");
     }
 }
 
@@ -515,7 +670,14 @@ fn open_deck(
         updating_form: false,
         loaded_modified: modified_time(path),
     }));
-    let (toolbar, header) = page_shell(&editor.borrow().deck.title, true);
+    let (toolbar, header) = page_shell(&editor.borrow().deck.title, false);
+    let window_title = adw::WindowTitle::new(&editor.borrow().deck.title, "All changes saved");
+    header.set_title_widget(Some(&window_title));
+    let back_button = gtk::Button::builder()
+        .icon_name("go-previous-symbolic")
+        .tooltip_text("Back to Library")
+        .build();
+    header.pack_start(&back_button);
     let save_button = gtk::Button::builder()
         .label("Save")
         .tooltip_text("Save Changes (Ctrl+S)")
@@ -523,21 +685,53 @@ fn open_deck(
         .css_classes(["suggested-action"])
         .build();
     header.pack_end(&save_button);
+    *state.editor_guard.borrow_mut() = Some(EditorGuard {
+        editor: editor.clone(),
+        save_button: save_button.downgrade(),
+    });
     let source_button = gtk::Button::builder()
         .icon_name("document-edit-symbolic")
         .tooltip_text("Open JSON in Text Editor")
         .build();
-    header.pack_end(&source_button);
+
     let trash_deck = gtk::Button::builder()
         .icon_name("user-trash-symbolic")
         .tooltip_text("Move Deck to Trash")
         .build();
-    header.pack_end(&trash_deck);
+
     let show_cards = gtk::Button::builder()
         .icon_name("sidebar-show-symbolic")
         .tooltip_text("Show Card List")
         .build();
     header.pack_start(&show_cards);
+
+    let properties = gtk::Button::with_label("Deck Properties…");
+    source_button.set_label("Open JSON in Text Editor");
+    trash_deck.set_label("Move Deck to Trash…");
+    let menu_content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    menu_content.set_margin_top(6);
+    menu_content.set_margin_bottom(6);
+    menu_content.set_margin_start(6);
+    menu_content.set_margin_end(6);
+    for button in [&properties, &source_button, &trash_deck] {
+        button.add_css_class("flat");
+        menu_content.append(button);
+    }
+    let popover = gtk::Popover::builder().child(&menu_content).build();
+    header.pack_end(
+        &gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Deck Options")
+            .popover(&popover)
+            .build(),
+    );
+    for button in [&source_button, &trash_deck] {
+        button.connect_clicked(glib::clone!(
+            #[weak]
+            popover,
+            move |_| popover.popdown()
+        ));
+    }
 
     let title = gtk::Entry::builder()
         .text(&editor.borrow().deck.title)
@@ -552,6 +746,7 @@ fn open_deck(
         .build();
     let card_list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
+        .valign(gtk::Align::Start)
         .css_classes(["boxed-list"])
         .build();
     let card_scroll = gtk::ScrolledWindow::builder()
@@ -559,13 +754,9 @@ fn open_deck(
         .vexpand(true)
         .child(&card_list)
         .build();
-    let add = gtk::Button::builder()
-        .label("Add Card")
-        .icon_name("list-add-symbolic")
-        .build();
+    let add = gtk::Button::builder().label("Add Card").build();
     let study = gtk::Button::builder()
         .label("Study")
-        .icon_name("media-playback-start-symbolic")
         .css_classes(["suggested-action"])
         .build();
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 12);
@@ -573,14 +764,67 @@ fn open_deck(
     sidebar.set_margin_bottom(12);
     sidebar.set_margin_start(12);
     sidebar.set_margin_end(12);
-    sidebar.append(&title);
-    sidebar.append(&description);
+    properties.connect_clicked(glib::clone!(
+        #[weak]
+        window,
+        #[weak]
+        popover,
+        #[strong]
+        title,
+        #[strong]
+        description,
+        move |_| {
+            popover.popdown();
+            let fields = gtk::Box::new(gtk::Orientation::Vertical, 12);
+            fields.append(&field("Deck Title", &title));
+            fields.append(&field("Description", &description));
+            let dialog = adw::AlertDialog::builder()
+                .heading("Deck Properties")
+                .body("Changes are included when you save the deck.")
+                .extra_child(&fields)
+                .build();
+            dialog.add_response("done", "Done");
+            dialog.set_close_response("done");
+            dialog.connect_closed(glib::clone!(
+                #[strong]
+                title,
+                #[strong]
+                description,
+                move |_| {
+                    // Detach reusable entries from this dialog's field wrappers.
+                    if let Some(parent) = title.parent().and_downcast::<gtk::Box>() {
+                        parent.remove(&title);
+                    }
+                    if let Some(parent) = description.parent().and_downcast::<gtk::Box>() {
+                        parent.remove(&description);
+                    }
+                }
+            ));
+            dialog.present(Some(&window));
+        }
+    ));
+    let cards_heading = gtk::Label::builder()
+        .label("Cards")
+        .halign(gtk::Align::Start)
+        .css_classes(["heading"])
+        .build();
+    sidebar.append(&cards_heading);
     sidebar.append(&search);
     sidebar.append(&card_scroll);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    actions.append(&add);
-    actions.append(&study);
-    sidebar.append(&actions);
+    add.set_hexpand(true);
+    sidebar.append(&add);
+    header.pack_start(&study);
+    let narrow_study = gtk::Button::builder()
+        .label("Study Deck")
+        .css_classes(["suggested-action"])
+        .visible(false)
+        .build();
+    narrow_study.connect_clicked(glib::clone!(
+        #[weak]
+        study,
+        move |_| study.emit_clicked()
+    ));
+    sidebar.append(&narrow_study);
 
     let empty = adw::StatusPage::builder()
         .icon_name("view-paged-symbolic")
@@ -604,10 +848,7 @@ fn open_deck(
     let tags = gtk::Entry::builder()
         .placeholder_text("grammar, verbs")
         .build();
-    let duplicate = gtk::Button::builder()
-        .label("Duplicate")
-        .icon_name("edit-copy-symbolic")
-        .build();
+    let duplicate = gtk::Button::builder().label("Duplicate").build();
     let move_up = gtk::Button::builder()
         .icon_name("go-up-symbolic")
         .tooltip_text("Move Card Up")
@@ -617,9 +858,8 @@ fn open_deck(
         .tooltip_text("Move Card Down")
         .build();
     let delete = gtk::Button::builder()
-        .label("Delete")
         .icon_name("user-trash-symbolic")
-        .css_classes(["destructive-action"])
+        .tooltip_text("Delete Card")
         .build();
     let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
     form.set_margin_top(24);
@@ -628,16 +868,29 @@ fn open_deck(
     form.set_margin_end(24);
     form.append(&field("Front", &front));
     form.append(&field("Back", &back));
+    let equation_hint = gtk::Label::builder()
+        .label(
+            r"Equations: $x^2$ inline or $$\frac{1}{2}$$ on its own line. Rendered when studying.",
+        )
+        .wrap(true)
+        .xalign(0.0)
+        .css_classes(["caption", "dim-label"])
+        .build();
+    form.append(&equation_hint);
     form.append(&field("Tags", &tags));
     let form_actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     form_actions.append(&duplicate);
     form_actions.append(&move_up);
     form_actions.append(&move_down);
+    let spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    form_actions.append(&spacer);
     form_actions.append(&delete);
     form.append(&form_actions);
+    let form_clamp = adw::Clamp::builder().maximum_size(720).child(&form).build();
     let form_scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&form)
+        .child(&form_clamp)
         .build();
     let detail_stack = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
@@ -663,7 +916,23 @@ fn open_deck(
         adw::BreakpointCondition::parse("max-width: 700px").expect("valid breakpoint"),
     );
     breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+    breakpoint.add_setter(&study, "visible", Some(&false.to_value()));
+    breakpoint.add_setter(&narrow_study, "visible", Some(&true.to_value()));
     adaptive.add_breakpoint(breakpoint);
+    show_cards.set_visible(split.is_collapsed());
+    split.connect_collapsed_notify(glib::clone!(
+        #[weak]
+        show_cards,
+        #[weak]
+        detail_stack,
+        move |split| {
+            show_cards.set_visible(split.is_collapsed());
+            if split.is_collapsed() && detail_stack.visible_child_name().as_deref() == Some("form")
+            {
+                split.set_show_sidebar(false);
+            }
+        }
+    ));
     toolbar.set_content(Some(&adaptive));
     show_cards.connect_clicked(glib::clone!(
         #[weak]
@@ -694,6 +963,9 @@ fn open_deck(
         editor,
         move |_, row| {
             let Some(row) = row else {
+                // List rebuilds happen while the model may be borrowed. Clear
+                // the visible selection without borrowing the model here.
+                detail_stack.set_visible_child_name("empty");
                 return;
             };
             let Some(id) = row
@@ -724,10 +996,12 @@ fn open_deck(
         }
     ));
 
-    connect_text_edit(&front, &editor, &save_button, |card, text| {
+    connect_text_edit(&front, &editor, &save_button, &card_list, |card, text| {
         card.front = text
     });
-    connect_text_edit(&back, &editor, &save_button, |card, text| card.back = text);
+    connect_text_edit(&back, &editor, &save_button, &card_list, |card, text| {
+        card.back = text
+    });
     tags.connect_changed(glib::clone!(
         #[weak]
         save_button,
@@ -751,11 +1025,17 @@ fn open_deck(
     ));
     title.connect_changed(glib::clone!(
         #[weak]
+        window_title,
+        #[weak]
         save_button,
         #[strong]
         editor,
         move |entry| {
+            if editor.borrow().updating_form {
+                return;
+            }
             editor.borrow_mut().deck.title = entry.text().to_string();
+            window_title.set_title(&entry.text());
             set_dirty(&editor, &save_button);
         }
     ));
@@ -765,6 +1045,9 @@ fn open_deck(
         #[strong]
         editor,
         move |entry| {
+            if editor.borrow().updating_form {
+                return;
+            }
             editor.borrow_mut().deck.description = entry.text().to_string();
             set_dirty(&editor, &save_button);
         }
@@ -821,22 +1104,55 @@ fn open_deck(
     connect_move_card(1, &move_down, &card_list, &save_button, &editor);
     delete.connect_clicked(glib::clone!(
         #[weak]
+        window,
+        #[weak]
         card_list,
         #[weak]
         save_button,
         #[weak]
         detail_stack,
+        #[weak]
+        search,
         #[strong]
         editor,
         move |_| {
             let Some(id) = editor.borrow().selected else {
                 return;
             };
-            editor.borrow_mut().deck.cards.retain(|card| card.id != id);
-            editor.borrow_mut().selected = None;
-            set_dirty(&editor, &save_button);
-            populate_card_list(&card_list, &editor.borrow().deck, "");
-            detail_stack.set_visible_child_name("empty");
+            let dialog = adw::AlertDialog::builder()
+                .heading("Delete Card?")
+                .body("The card will be removed from this deck when you save.")
+                .build();
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("delete", "Delete Card");
+            dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+            dialog.set_close_response("cancel");
+            dialog.connect_response(
+                None,
+                glib::clone!(
+                    #[weak]
+                    card_list,
+                    #[weak]
+                    save_button,
+                    #[weak]
+                    detail_stack,
+                    #[weak]
+                    search,
+                    #[strong]
+                    editor,
+                    move |_, response| {
+                        if response != "delete" {
+                            return;
+                        }
+                        editor.borrow_mut().deck.cards.retain(|card| card.id != id);
+                        editor.borrow_mut().selected = None;
+                        set_dirty(&editor, &save_button);
+                        populate_card_list(&card_list, &editor.borrow().deck, &search.text());
+                        detail_stack.set_visible_child_name("empty");
+                    }
+                ),
+            );
+            dialog.present(Some(&window));
         }
     ));
     save_button.connect_clicked(glib::clone!(
@@ -917,14 +1233,12 @@ fn open_deck(
         #[weak]
         save_button,
         #[strong]
-        state,
-        #[strong]
         editor,
         move |_| {
             if editor.borrow().dirty && !save_editor(&window, &editor, &save_button) {
                 return;
             }
-            show_study_setup(&navigation, &window, &state, &editor.borrow().path);
+            show_study_setup(&navigation, &window, &editor.borrow().path);
         }
     ));
 
@@ -946,6 +1260,115 @@ fn open_deck(
     }
 
     let page = adw::NavigationPage::new(&toolbar, &editor.borrow().deck.title);
+    save_button.connect_sensitive_notify(glib::clone!(
+        #[weak]
+        page,
+        #[weak]
+        window_title,
+        move |button| {
+            page.set_can_pop(!button.is_sensitive());
+            window_title.set_subtitle(if button.is_sensitive() {
+                "Unsaved changes"
+            } else {
+                "All changes saved"
+            });
+        }
+    ));
+    back_button.connect_clicked(glib::clone!(
+        #[weak]
+        window,
+        #[weak]
+        navigation,
+        #[strong]
+        state,
+        move |_| leave_editor(
+            &window,
+            &state,
+            glib::clone!(
+                #[weak]
+                window,
+                #[weak]
+                navigation,
+                #[strong]
+                state,
+                move || show_library(&navigation, &window, &state)
+            )
+        )
+    ));
+    // Save/conflict resolution can normalize or replace the model. Refresh after
+    // the save callback releases its borrow, preserving selection where possible.
+    save_button.connect_sensitive_notify(glib::clone!(
+        #[weak]
+        card_list,
+        #[weak]
+        search,
+        #[weak]
+        title,
+        #[weak]
+        description,
+        #[weak]
+        detail_stack,
+        #[weak]
+        window_title,
+        #[strong]
+        editor,
+        move |button| {
+            if button.is_sensitive() {
+                return;
+            }
+            glib::idle_add_local_once(glib::clone!(
+                #[weak]
+                card_list,
+                #[weak]
+                search,
+                #[weak]
+                title,
+                #[weak]
+                description,
+                #[weak]
+                detail_stack,
+                #[weak]
+                window_title,
+                #[strong]
+                editor,
+                move || {
+                    let (deck, selected) = {
+                        let state = editor.borrow();
+                        (state.deck.clone(), state.selected)
+                    };
+                    editor.borrow_mut().updating_form = true;
+                    title.set_text(&deck.title);
+                    description.set_text(&deck.description);
+                    window_title.set_title(&deck.title);
+                    editor.borrow_mut().updating_form = false;
+                    populate_card_list(&card_list, &deck, &search.text());
+                    detail_stack.set_visible_child_name("empty");
+                    if let Some(id) = selected {
+                        select_card(&card_list, id);
+                    }
+                }
+            ));
+        }
+    ));
+    page.connect_shown(glib::clone!(
+        #[strong]
+        editor,
+        #[weak]
+        save_button,
+        move |_| {
+            let path = editor.borrow().path.clone();
+            if editor.borrow().dirty || editor.borrow().loaded_modified == modified_time(&path) {
+                return;
+            }
+            if let Ok(deck) = storage::load_deck(&path) {
+                let mut state = editor.borrow_mut();
+                state.deck = deck;
+                state.loaded_modified = modified_time(&path);
+                drop(state);
+                save_button.notify("sensitive");
+            }
+        }
+    ));
     navigation.push(&page);
 }
 
@@ -957,8 +1380,13 @@ fn field(label: &str, child: &impl IsA<gtk::Widget>) -> gtk::Box {
         .css_classes(["heading"])
         .build();
     container.append(&label);
-    let frame = gtk::Frame::builder().child(child).build();
-    container.append(&frame);
+    if child.is::<gtk::TextView>() {
+        let frame = gtk::Frame::builder().child(child).build();
+        frame.add_css_class("card-input");
+        container.append(&frame);
+    } else {
+        container.append(child);
+    }
     container
 }
 
@@ -966,9 +1394,12 @@ fn connect_text_edit(
     view: &gtk::TextView,
     editor: &Rc<RefCell<EditorState>>,
     save_button: &gtk::Button,
+    card_list: &gtk::ListBox,
     update: impl Fn(&mut Card, String) + 'static,
 ) {
     view.buffer().connect_changed(glib::clone!(
+        #[weak]
+        card_list,
         #[weak]
         save_button,
         #[strong]
@@ -986,6 +1417,27 @@ fn connect_text_edit(
                 );
             }) {
                 save_button.set_sensitive(true);
+                let state = editor.borrow();
+                if let Some(card) = state
+                    .deck
+                    .cards
+                    .iter()
+                    .find(|card| Some(card.id) == state.selected)
+                {
+                    let mut child = card_list.first_child();
+                    while let Some(widget) = child {
+                        if widget.widget_name() == format!("card-{}", card.id) {
+                            if let Some(row) = widget.downcast_ref::<adw::ActionRow>() {
+                                row.set_title(&glib::markup_escape_text(&single_line(&card.front)));
+                                row.set_subtitle(&glib::markup_escape_text(&single_line(
+                                    &card.back,
+                                )));
+                            }
+                            break;
+                        }
+                        child = widget.next_sibling();
+                    }
+                }
             }
         }
     ));
@@ -1064,9 +1516,28 @@ fn populate_card_list(list: &gtk::ListBox, deck: &Deck, query: &str) {
         let row = adw::ActionRow::builder()
             .title(glib::markup_escape_text(&single_line(&card.front)))
             .subtitle(glib::markup_escape_text(&single_line(&card.back)))
+            .title_lines(1)
+            .subtitle_lines(1)
             .activatable(true)
             .build();
         row.set_widget_name(&format!("card-{}", card.id));
+        list.append(&row);
+    }
+    if list.first_child().is_none() {
+        let row = status_row(
+            if query.is_empty() {
+                "No Cards Yet"
+            } else {
+                "No Matching Cards"
+            },
+            if query.is_empty() {
+                "Add a card to start building this deck."
+            } else {
+                "Try another question, answer, or tag."
+            },
+            "system-search-symbolic",
+        );
+        row.set_selectable(false);
         list.append(&row);
     }
 }
@@ -1103,7 +1574,6 @@ fn save_editor(
             state.dirty = false;
             state.loaded_modified = modified_time(&state.path);
             save_button.set_sensitive(false);
-            toast_window(window, "Deck saved");
             true
         }
         Err(error) => {
@@ -1122,12 +1592,13 @@ fn show_save_conflict(
         .heading("The JSON Changed Externally")
         .body("Choose which version to keep. Saving a copy preserves both versions.")
         .build();
+    dialog.add_response("cancel", "Keep Editing");
     dialog.add_response("reload", "Reload External");
-    dialog.add_response("copy", "Save Native Copy");
+    dialog.add_response("copy", "Save a Copy");
     dialog.add_response("overwrite", "Overwrite");
     dialog.set_response_appearance("overwrite", adw::ResponseAppearance::Destructive);
     dialog.set_default_response(Some("copy"));
-    dialog.set_close_response("reload");
+    dialog.set_close_response("cancel");
     dialog.connect_response(
         None,
         glib::clone!(
@@ -1148,10 +1619,7 @@ fn show_save_conflict(
                             editor.dirty = false;
                             editor.loaded_modified = modified_time(&path);
                             save_button.set_sensitive(false);
-                            toast_window(
-                                &window,
-                                "External version loaded; reselect a card to refresh the form",
-                            );
+                            toast_window(&window, "External version loaded");
                         }
                         Err(error) => toast_window(&window, &error.to_string()),
                     }
@@ -1198,7 +1666,6 @@ fn show_save_conflict(
 fn show_study_setup(
     navigation: &adw::NavigationView,
     window: &adw::ApplicationWindow,
-    state: &AppState,
     path: &Path,
 ) {
     let deck = match storage::load_deck(path) {
@@ -1242,8 +1709,6 @@ fn show_study_setup(
             window,
             #[weak]
             navigation,
-            #[strong]
-            state,
             move |_, response| {
                 if response != "start" {
                     return;
@@ -1259,14 +1724,7 @@ fn show_study_setup(
                         .map(str::to_owned)
                         .collect::<Vec<_>>(),
                 );
-                show_study(
-                    &navigation,
-                    &window,
-                    &state,
-                    &path,
-                    chosen_order,
-                    tag_filter,
-                );
+                show_study(&navigation, &window, &path, chosen_order, tag_filter);
             }
         ),
     );
@@ -1276,7 +1734,6 @@ fn show_study_setup(
 fn show_study(
     navigation: &adw::NavigationView,
     window: &adw::ApplicationWindow,
-    _state: &AppState,
     path: &Path,
     order: StudyOrder,
     tag_filter: Vec<String>,
@@ -1296,7 +1753,8 @@ fn show_study(
     let deck = Rc::new(deck);
     let session = Rc::new(RefCell::new(session));
     let path = Rc::new(path.to_owned());
-    let (toolbar, _header) = page_shell("Study", true);
+    let (toolbar, header) = page_shell("Study", true);
+    header.set_title_widget(Some(&adw::WindowTitle::new(&deck.title, "Study")));
     let phase = gtk::Label::builder()
         .halign(gtk::Align::Start)
         .hexpand(true)
@@ -1327,27 +1785,13 @@ fn show_study(
         .halign(gtk::Align::Start)
         .css_classes(["caption", "dim-label"])
         .build();
-    let prompt = gtk::Label::builder()
-        .wrap(true)
-        .justify(gtk::Justification::Center)
-        .selectable(true)
-        .css_classes(["title-1"])
-        .margin_top(18)
-        .margin_bottom(6)
-        .build();
+    let prompt = crate::card_content::new("title-1", 20);
     let answer_label = gtk::Label::builder()
         .label("Answer")
         .halign(gtk::Align::Start)
         .css_classes(["caption", "dim-label"])
         .build();
-    let answer = gtk::Label::builder()
-        .wrap(true)
-        .justify(gtk::Justification::Center)
-        .selectable(true)
-        .css_classes(["title-2"])
-        .margin_top(18)
-        .margin_bottom(6)
-        .build();
+    let answer = crate::card_content::new("title-2", 16);
     let reveal = gtk::Button::builder()
         .label("Show Answer")
         .css_classes(["suggested-action", "pill"])
@@ -1355,7 +1799,7 @@ fn show_study(
         .build();
     let again = gtk::Button::builder()
         .label("Again")
-        .css_classes(["destructive-action", "pill"])
+        .css_classes(["pill"])
         .hexpand(true)
         .build();
     let good = gtk::Button::builder()
@@ -1382,29 +1826,31 @@ fn show_study(
         .child(&actions)
         .build();
     let question_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    question_content.set_vexpand(true);
     question_content.append(&question_label);
-    question_content.append(&prompt);
     let question_scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vexpand(true)
-        .child(&question_content)
+        .child(&prompt)
         .build();
     let question_face = gtk::Box::new(gtk::Orientation::Vertical, 0);
     question_face.add_css_class("card");
     question_face.add_css_class("study-card");
-    question_face.append(&question_scroll);
+    question_content.append(&question_scroll);
+    question_face.append(&question_content);
     let answer_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    answer_content.set_vexpand(true);
     answer_content.append(&answer_label);
-    answer_content.append(&answer);
     let answer_scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
         .vexpand(true)
-        .child(&answer_content)
+        .child(&answer)
         .build();
     let answer_face = gtk::Box::new(gtk::Orientation::Vertical, 0);
     answer_face.add_css_class("card");
     answer_face.add_css_class("study-card");
-    answer_face.append(&answer_scroll);
+    answer_content.append(&answer_scroll);
+    answer_face.append(&answer_content);
     let faces = gtk::Stack::builder()
         .hhomogeneous(true)
         .vhomogeneous(true)
@@ -1414,21 +1860,14 @@ fn show_study(
     faces.add_named(&answer_face, Some("answer"));
     faces.set_visible_child_name("question");
     let card = FlipCard::new(&faces);
-    let card_aspect = gtk::AspectFrame::builder()
-        .ratio(2.0 / 3.0)
-        .obey_child(false)
-        .xalign(0.5)
-        .yalign(0.5)
-        .child(&card)
-        .build();
     let card_clamp = adw::Clamp::builder()
-        .maximum_size(420)
+        .maximum_size(720)
         .margin_top(24)
         .margin_bottom(24)
         .margin_start(24)
         .margin_end(24)
         .vexpand(true)
-        .child(&card_aspect)
+        .child(&card)
         .build();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&progress_clamp);
@@ -1550,8 +1989,8 @@ fn connect_rating(
     snapshot: &Rc<Deck>,
     session: &Rc<RefCell<StudySession>>,
     path: &Rc<PathBuf>,
-    prompt: &gtk::Label,
-    answer: &gtk::Label,
+    prompt: &gtk::TextView,
+    answer: &gtk::TextView,
     progress: &gtk::ProgressBar,
     phase: &gtk::Label,
     counter: &gtk::Label,
@@ -1677,6 +2116,8 @@ fn connect_rating(
                     #[strong]
                     snapshot,
                     #[strong]
+                    path,
+                    #[strong]
                     session,
                     #[strong]
                     card_animation,
@@ -1686,8 +2127,13 @@ fn connect_rating(
                     confetti_animation,
                     move || {
                         if complete {
-                            toast_window(&window, "Session complete");
-                            navigation.pop();
+                            show_study_summary(
+                                &window,
+                                &navigation,
+                                &snapshot,
+                                &session.borrow(),
+                                &path,
+                            );
                             return;
                         }
                         let again_button = match rating {
@@ -1718,12 +2164,80 @@ fn connect_rating(
     ));
 }
 
+fn show_study_summary(
+    window: &adw::ApplicationWindow,
+    navigation: &adw::NavigationView,
+    deck: &Deck,
+    session: &StudySession,
+    path: &Path,
+) {
+    let summary = session.clone().finish(Utc::now());
+    let (toolbar, _) = page_shell("Session Complete", true);
+    let results = adw::StatusPage::builder()
+        .icon_name("object-select-symbolic")
+        .title("Session Complete")
+        .description(&deck.title)
+        .build();
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 24);
+    content.set_halign(gtk::Align::Center);
+    let totals = gtk::Label::builder()
+        .label(format!(
+            "{} card{} studied\nRatings: {} recalled · {} still learning",
+            summary.unique_card_count,
+            if summary.unique_card_count == 1 {
+                ""
+            } else {
+                "s"
+            },
+            summary.good_count,
+            summary.again_count
+        ))
+        .justify(gtk::Justification::Center)
+        .wrap(true)
+        .build();
+    content.append(&totals);
+    let restart = gtk::Button::builder()
+        .label("Study Again")
+        .css_classes(["suggested-action", "pill"])
+        .build();
+    let done = gtk::Button::builder()
+        .label("Back to Deck")
+        .css_classes(["pill"])
+        .build();
+    content.append(&restart);
+    content.append(&done);
+    results.set_child(Some(&content));
+    toolbar.set_content(Some(&results));
+    let path = path.to_owned();
+    let order = session.order;
+    let tags = session.tag_filter.clone();
+    restart.connect_clicked(glib::clone!(
+        #[weak]
+        window,
+        #[weak]
+        navigation,
+        move |_| {
+            navigation.pop();
+            show_study(&navigation, &window, &path, order, tags.clone());
+        }
+    ));
+    done.connect_clicked(glib::clone!(
+        #[weak]
+        navigation,
+        move |_| {
+            navigation.pop();
+        }
+    ));
+    navigation.pop();
+    navigation.push(&adw::NavigationPage::new(&toolbar, "Session Complete"));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_study_card(
     deck: &Deck,
     session: &StudySession,
-    prompt: &gtk::Label,
-    answer: &gtk::Label,
+    prompt: &gtk::TextView,
+    answer: &gtk::TextView,
     progress: &gtk::ProgressBar,
     phase: &gtk::Label,
     counter: &gtk::Label,
@@ -1733,8 +2247,17 @@ fn update_study_card(
         .current_card()
         .and_then(|id| deck.cards.iter().find(|card| card.id == id))
     {
-        prompt.set_text(&card.front);
-        answer.set_text(&card.back);
+        crate::card_content::set_text(prompt, &card.front, 20);
+        crate::card_content::set_text(answer, &card.back, 16);
+        for label in [prompt, answer] {
+            if let Some(scroll) = label
+                .ancestor(gtk::ScrolledWindow::static_type())
+                .and_downcast::<gtk::ScrolledWindow>()
+            {
+                let adjustment = scroll.vadjustment();
+                adjustment.set_value(adjustment.lower());
+            }
+        }
     }
     let study_progress = session.progress();
     progress.set_fraction(if study_progress.total == 0 {
@@ -1753,10 +2276,12 @@ fn update_study_card(
             progress.set_tooltip_text(Some("Initial card pass"));
         }
         StudyPhase::MissedCards => {
-            again.set_label("Bad");
-            again.set_tooltip_text(Some("Mark as incorrect without showing it again"));
+            again.set_label("Still Learning");
+            again.set_tooltip_text(Some(
+                "Record that this card needs more practice; continue to the next card",
+            ));
             progress.add_css_class("warning");
-            phase.set_text("Missed cards");
+            phase.set_text("Final review");
             counter.set_text(&format!("Card {current} of {}", study_progress.total));
             progress.set_tooltip_text(Some("Reviewing cards rated Again"));
         }
@@ -2335,17 +2860,29 @@ fn install_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
         "
+        .empty-library,
+        .empty-library > row {
+            background: transparent;
+        }
         .study-card {
             padding: 24px;
             border-radius: 18px;
+        }
+        .study-content,
+        .study-content text {
+            background-color: transparent;
         }
         .study-progress trough,
         .study-progress progress {
             min-height: 8px;
             border-radius: 999px;
         }
-        textview {
-            min-height: 110px;
+        .card-input textview {
+            min-height: 140px;
+            border-radius: 8px;
+        }
+        .card-input {
+            border-radius: 8px;
         }
         ",
     );
@@ -2359,6 +2896,350 @@ fn install_css() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Run under a desktop session or xvfb-run with --ignored --test-threads=1.
+    #[test]
+    #[ignore = "requires a graphical display"]
+    fn gui_editing_and_study_flow() {
+        adw::init().expect("GTK initialization");
+        gtk::Settings::default()
+            .unwrap()
+            .set_gtk_enable_animations(false);
+        install_css();
+        let temporary = tempfile::tempdir().unwrap();
+        let app = adw::Application::builder()
+            .application_id("page.polli.Flashcards.GuiTest")
+            .build();
+        app.register(gio::Cancellable::NONE).unwrap();
+        let window = adw::ApplicationWindow::builder()
+            .application(&app)
+            .default_width(980)
+            .default_height(700)
+            .build();
+        let navigation = adw::NavigationView::new();
+        window.set_content(Some(&navigation));
+        let state = AppState {
+            preferences: Rc::new(RefCell::new(Preferences {
+                library: temporary.path().to_owned(),
+                ..Preferences::default()
+            })),
+            monitor: Rc::new(RefCell::new(None)),
+            editor_guard: Rc::new(RefCell::new(None)),
+        };
+        install_actions(&app, &window, &navigation, &state);
+        show_library(&navigation, &window, &state);
+        window.present();
+        settle();
+        assert!(
+            widgets::<gtk::Button>(&window)
+                .iter()
+                .any(|button| button.label().as_deref() == Some("Create Deck"))
+        );
+        capture(&window, "library-empty");
+
+        let mut deck = Deck::new("Capitals");
+        deck.cards.push(Card::new("Portugal", "Lisbon"));
+        let path = temporary.path().join("capitals.json");
+        storage::save_deck(&path, &deck).unwrap();
+        show_library(&navigation, &window, &state);
+        settle();
+        capture(&window, "library");
+        open_deck(&navigation, &window, &state, &path);
+        settle();
+        let list = widgets::<gtk::ListBox>(&window)
+            .into_iter()
+            .find(|list| list.selection_mode() == gtk::SelectionMode::Single)
+            .unwrap();
+        select_card(&list, deck.cards[0].id);
+        let views = widgets::<gtk::TextView>(&window);
+        views[0].buffer().set_text("Updated question");
+        let guard = state.editor_guard.borrow().clone().unwrap();
+        assert!(guard.editor.borrow().dirty);
+        let row = list
+            .row_at_index(0)
+            .unwrap()
+            .downcast::<adw::ActionRow>()
+            .unwrap();
+        assert_eq!(row.title(), "Updated question");
+        assert!(!navigation.visible_page().unwrap().can_pop());
+        settle();
+        capture(&window, "editor");
+
+        let continued = Rc::new(Cell::new(false));
+        leave_editor(&window, &state, {
+            let continued = continued.clone();
+            move || continued.set(true)
+        });
+        respond(&window, "Keep Editing");
+        settle();
+        assert!(!continued.get());
+        assert!(guard.editor.borrow().dirty);
+        leave_editor(&window, &state, {
+            let continued = continued.clone();
+            move || continued.set(true)
+        });
+        respond(&window, "Save");
+        settle();
+        assert!(continued.get());
+        assert_eq!(
+            storage::load_deck(&path).unwrap().cards[0].front,
+            "Updated question"
+        );
+        assert!(!guard.editor.borrow().dirty);
+        assert!(navigation.visible_page().unwrap().can_pop());
+
+        // Reopening properties must not reparent entries still owned by a dialog.
+        let properties = widgets::<gtk::Button>(&window)
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("Deck Properties…"))
+            .unwrap();
+        for _ in 0..2 {
+            properties.emit_clicked();
+            settle();
+            let dialog = window
+                .visible_dialog()
+                .unwrap()
+                .downcast::<adw::AlertDialog>()
+                .unwrap();
+            let entries = widgets::<gtk::Entry>(&dialog);
+            entries[0].set_text("Renamed Deck");
+            respond(&window, "Done");
+            settle();
+        }
+        assert!(
+            widgets::<adw::WindowTitle>(&window)
+                .iter()
+                .any(|title| title.title() == "Renamed Deck")
+        );
+        leave_editor(&window, &state, || {});
+        respond(&window, "Discard Changes");
+        settle();
+        assert_eq!(guard.editor.borrow().deck.title, "Capitals");
+        assert!(!guard.editor.borrow().dirty);
+        select_card(&list, deck.cards[0].id);
+
+        window.set_default_size(390, 600);
+        settle();
+        capture(&window, "editor-narrow");
+        show_study(&navigation, &window, &path, StudyOrder::Sequential, vec![]);
+        settle();
+        capture(&window, "study-narrow");
+        let reveal = widgets::<gtk::Button>(&window)
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("Show Answer"))
+            .unwrap();
+        reveal.emit_clicked();
+        settle();
+        let good = widgets::<gtk::Button>(&window)
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("Good"))
+            .unwrap();
+        good.emit_clicked();
+        settle();
+        assert_eq!(
+            navigation.visible_page().unwrap().title(),
+            "Session Complete"
+        );
+        assert_eq!(storage::load_deck(&path).unwrap().sessions.len(), 1);
+        capture(&window, "completion");
+        widgets::<gtk::Button>(&window)
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("Back to Deck"))
+            .unwrap()
+            .emit_clicked();
+        settle();
+        assert_eq!(guard.editor.borrow().deck.sessions.len(), 1);
+
+        // A reload must replace both the sidebar preview and the editable form.
+        let mut external = storage::load_deck(&path).unwrap();
+        external.cards[0].front = "External question".into();
+        storage::save_deck(&path, &external).unwrap();
+        views[0].buffer().set_text("Local conflicting question");
+        guard.editor.borrow_mut().loaded_modified = Some(SystemTime::UNIX_EPOCH);
+        assert!(!save_editor(
+            &window,
+            &guard.editor,
+            &guard.save_button.upgrade().unwrap()
+        ));
+        respond(&window, "Reload External");
+        settle();
+        let row = list
+            .row_at_index(0)
+            .unwrap()
+            .downcast::<adw::ActionRow>()
+            .unwrap();
+        assert_eq!(row.title(), "External question");
+        assert!(!guard.editor.borrow().dirty);
+
+        window.set_default_size(980, 700);
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        external.cards[0].front = "A longer question with several lines of text. ".repeat(35);
+        storage::save_deck(&path, &external).unwrap();
+        show_study(&navigation, &window, &path, StudyOrder::Sequential, vec![]);
+        settle();
+        capture(&window, "study-long-dark");
+        let long_content = widgets::<gtk::TextView>(&window)
+            .into_iter()
+            .find(|view| view.tooltip_text().as_deref() == Some(&external.cards[0].front))
+            .unwrap();
+        let scroll = long_content
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        assert!(scroll.vadjustment().upper() > scroll.vadjustment().page_size());
+
+        // Both faces render math without changing the portable source text.
+        external.cards[0].front = r"Solve $ax^2 + bx + c = 0$.".into();
+        external.cards[0].back = r"$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$".into();
+        storage::save_deck(&path, &external).unwrap();
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceLight);
+        window.set_default_size(390, 600);
+        show_study(&navigation, &window, &path, StudyOrder::Sequential, vec![]);
+        settle();
+        let equation_views: Vec<_> = widgets::<gtk::TextView>(&window)
+            .into_iter()
+            .filter(|view| {
+                let source = view.tooltip_text();
+                source.as_deref() == Some(&external.cards[0].front)
+                    || source.as_deref() == Some(&external.cards[0].back)
+            })
+            .collect();
+        assert_eq!(equation_views.len(), 2);
+        for view in &equation_views {
+            let buffer = view.buffer();
+            assert!(
+                (0..buffer.char_count())
+                    .any(|offset| buffer.iter_at_offset(offset).paintable().is_some())
+            );
+            assert!(!view.is_editable());
+        }
+        let light_pixels = equation_pixels(&equation_views[0]);
+        capture(&window, "study-equations-light");
+        widgets::<gtk::Button>(&navigation.visible_page().unwrap())
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("Show Answer"))
+            .unwrap()
+            .emit_clicked();
+        settle();
+        capture(&window, "study-equation-answer");
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        settle();
+        for view in &equation_views {
+            let buffer = view.buffer();
+            assert!(
+                (0..buffer.char_count())
+                    .any(|offset| buffer.iter_at_offset(offset).paintable().is_some())
+            );
+        }
+        assert_ne!(light_pixels, equation_pixels(&equation_views[0]));
+        capture(&window, "study-equations-dark");
+        let stored = storage::load_deck(&path).unwrap();
+        assert_eq!(stored.cards[0].front, external.cards[0].front);
+        assert_eq!(stored.cards[0].back, external.cards[0].back);
+
+        external.cards[0].front = r"Invalid $\frac{$ and <plain> & text".into();
+        storage::save_deck(&path, &external).unwrap();
+        show_study(&navigation, &window, &path, StudyOrder::Sequential, vec![]);
+        settle();
+        let fallback = widgets::<gtk::TextView>(&window)
+            .into_iter()
+            .find(|view| view.tooltip_text().as_deref() == Some(&external.cards[0].front))
+            .unwrap();
+        let buffer = fallback.buffer();
+        assert_eq!(
+            buffer.text(&buffer.start_iter(), &buffer.end_iter(), true),
+            external.cards[0].front
+        );
+
+        external.cards[0].front = format!("$$ {} $$", vec!["x^2"; 40].join(" + "));
+        storage::save_deck(&path, &external).unwrap();
+        show_study(&navigation, &window, &path, StudyOrder::Sequential, vec![]);
+        settle();
+        let wide = widgets::<gtk::TextView>(&window)
+            .into_iter()
+            .find(|view| view.tooltip_text().as_deref() == Some(&external.cards[0].front))
+            .unwrap();
+        assert!(!equation_pixels(&wide).is_empty());
+        let scroll = wide
+            .ancestor(gtk::ScrolledWindow::static_type())
+            .and_downcast::<gtk::ScrolledWindow>()
+            .unwrap();
+        assert!(scroll.hadjustment().upper() > scroll.hadjustment().page_size());
+        window.close();
+    }
+
+    fn equation_pixels(view: &gtk::TextView) -> Vec<u8> {
+        let buffer = view.buffer();
+        let texture = (0..buffer.char_count())
+            .find_map(|offset| buffer.iter_at_offset(offset).paintable())
+            .unwrap()
+            .downcast::<gdk::Texture>()
+            .unwrap();
+        let stride = texture.width() as usize * 4;
+        let mut pixels = vec![0; stride * texture.height() as usize];
+        texture.download(&mut pixels, stride);
+        pixels
+    }
+
+    fn widgets<T: IsA<gtk::Widget> + glib::object::IsClass>(
+        root: &impl IsA<gtk::Widget>,
+    ) -> Vec<T> {
+        fn visit<T: IsA<gtk::Widget> + glib::object::IsClass>(
+            widget: &gtk::Widget,
+            found: &mut Vec<T>,
+        ) {
+            if let Ok(item) = widget.clone().downcast::<T>() {
+                found.push(item);
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                visit(&widget, found);
+                child = widget.next_sibling();
+            }
+        }
+        let mut found = Vec::new();
+        visit(root.as_ref(), &mut found);
+        found
+    }
+
+    fn respond(window: &adw::ApplicationWindow, label: &str) {
+        let dialog = window.visible_dialog().expect("an open dialog");
+        widgets::<gtk::Button>(&dialog)
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some(label))
+            .expect("dialog response button")
+            .emit_clicked();
+    }
+
+    fn settle() {
+        let loop_ = glib::MainLoop::new(None, false);
+        glib::timeout_add_local_once(std::time::Duration::from_millis(150), {
+            let loop_ = loop_.clone();
+            move || loop_.quit()
+        });
+        loop_.run();
+    }
+
+    fn capture(window: &adw::ApplicationWindow, name: &str) {
+        let Ok(directory) = std::env::var("FLASHCARDS_SCREENSHOTS") else {
+            return;
+        };
+        let paintable = gtk::WidgetPaintable::new(Some(window));
+        for _ in 0..10 {
+            let snapshot = gtk::Snapshot::new();
+            paintable.snapshot(&snapshot, window.width() as f64, window.height() as f64);
+            if let Some(node) = snapshot.to_node() {
+                let texture = window.renderer().unwrap().render_texture(&node, None);
+                texture
+                    .save_to_png(Path::new(&directory).join(format!("{name}.png")))
+                    .unwrap();
+                return;
+            }
+            window.queue_draw();
+            settle();
+        }
+        panic!("window snapshot was not ready: {name}");
+    }
 
     #[test]
     fn selected_card_mutation_does_not_nest_refcell_borrows() {
