@@ -31,8 +31,36 @@ merged after an external edit.
 ```
 
 `description`, `tags`, rating `history`, and `sessions` are omitted when empty.
-Tags are lowercase, sorted, unique strings. Fronts and backs are plain Unicode
-text; line breaks are preserved.
+Tags are lowercase, sorted, unique strings. Fronts and backs are Unicode text;
+line breaks are preserved. They may include LaTeX equations for the study view.
+
+## Equations
+
+Use `$...$` or `\(...\)` for inline equations, and `$$...$$` or `\[...\]`
+for equations on their own line. Both the front and back support mixed text
+and math, including fractions, roots, superscripts, subscripts, Greek letters,
+sums, and integrals. For example, type this directly in the card editor:
+
+```text
+Solve $ax^2 + bx + c = 0$.
+
+$$x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}$$
+```
+
+JSON requires backslashes to be escaped, so the same answer in a deck file is:
+
+```json
+"back": "$$x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$$"
+```
+
+Rendering works offline with a bundled math font. The editor and JSON retain
+the original source. Invalid or unsupported LaTeX and unclosed delimiters
+display as text rather than preventing a study session. Hover over study
+content to see its source. Wide equations can be scrolled horizontally.
+
+Single-dollar math must not start or end with whitespace or span multiple
+lines; ordinary prices such as `Costs $5 and $10` remain text. Escape a dollar
+sign with `\$` to prevent it from being interpreted as a delimiter.
 
 ## Review data
 
